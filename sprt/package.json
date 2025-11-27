@@ -1,0 +1,12 @@
+{
+  "name": "hydrochess-sprt",
+  "version": "1.0.0",
+  "description": "SPRT testing tool for HydroChess engine",
+  "main": "sprt.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node sprt.js"
+  },
+  "keywords": ["chess", "engine", "sprt", "testing"],
+  "license": "MIT"
+}
