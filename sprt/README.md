@@ -24,7 +24,7 @@ This will:
 
 Then open in your browser:
 
-- **URL**: `http://localhost:3000/sprt/web/`
+- **URL**: `http://localhost:3000/`
 
 All SPRT configuration and running is done from this page.
 

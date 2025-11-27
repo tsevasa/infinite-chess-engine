@@ -93,29 +93,44 @@ const bestMove = engine.get_best_move();
 
 ## SPRT Testing
 
-The engine includes a comprehensive SPRT (Sequential Probability Ratio Test) tool for comparing engine versions.
+The engine includes a comprehensive SPRT (Sequential Probability Ratio Test) tool, exposed through a
+**web-based UI** that compares an old vs new WASM build directly in the browser.
+
+# Start the web SPRT helper (builds web WASM + starts dev server)
 
 ```bash
 cd sprt
-
-# First time setup
-wasm-pack build --target nodejs --out-dir pkg-node
-
-# Run SPRT test
-node sprt.js run                    # Default settings
-node sprt.js run gainer all         # Gainer bounds for weak engines
-node sprt.js run nonreg top200      # Non-regression test
+npm run dev
 ```
 
-Features:
-- **Automatic baseline/test management**: Snapshots old engine, rebuilds new
-- **Parallel game playing**: Uses worker threads for speed
-- **Standard SPRT bounds presets**: stockfish_ltc, stockfish_stc, top30, top200, all
-- **Gainer vs non-regression modes**: Different hypothesis testing
-- **Coordinate-based openings**: Uses engine's own legal move generation
-- **Color-reversed pairs**: Each opening played with both color assignments
+This script:
 
-See [sprt/README.md](sprt/README.md) for full documentation.
+- Treats the root `pkg` directory as the **OLD** engine snapshot
+- Builds a new **web** WASM into `pkg-new` via `wasm-pack build --target web --out-dir pkg-new`
+- Copies both into `sprt/web/pkg-old` and `sprt/web/pkg-new`
+- Starts `npx serve .` in `sprt/web` so the browser UI can import both
+
+Then in your browser, open:
+
+- **URL**: `http://localhost:3000/`
+
+From there you can configure and run SPRT entirely in the UI.
+
+Features:
+- **Web-based control panel**: Configure bounds preset/mode, alpha/beta, time per move, concurrency, min/max games
+- **Parallel game playing in browser**: Uses Web Workers for concurrency
+- **Standard SPRT bounds presets**: `stockfish_ltc`, `stockfish_stc`, `top30`, `top200`, `all`
+- **Gainer vs non-regression modes**: Hypothesis testing for different scenarios
+- **Random coordinate-based openings**: Random legal white first move, shared by a **pair** of games
+- **Color-reversed pairs**: For each opening, one game with the new engine as White, one with the old engine as White
+- **Even-game termination**: SPRT will only stop after completing full pairs
+- **Rich logging and downloads**:
+    - Game progress log with W/L/D, Elo, LLR and opening tag
+    - Final / aborted summary blocks
+    - Downloadable plain-text logs
+    - Downloadable ICN-style game list with `[Result "..."]` metadata
+
+See [sprt/README.md](sprt/README.md) for full documentation and screenshots.
 
 ## Project Structure
 
@@ -130,12 +145,10 @@ hydrochess-wasm/
 │   ├── evaluation.rs   # Position evaluation
 │   ├── normalization.rs # Coordinate normalization for infinite boards
 │   └── utils.rs        # Utilities and panic hook
-├── sprt/               # SPRT testing tool
-│   ├── sprt.js         # Main SPRT script
-│   ├── game-runner.js  # Game playing logic
-│   └── wasm-loader.js  # Node.js WASM loader
+├── sprt/               # SPRT testing helper + web UI
+│   ├── sprt.js         # Web helper: builds web WASM & serves sprt/web
+│   └── web/            # Browser UI, workers, and WASM packages
 ├── pkg/                # Browser WASM build (generated)
-├── pkg-node/           # Node.js WASM build (generated)
 └── Cargo.toml          # Rust dependencies
 ```
 
