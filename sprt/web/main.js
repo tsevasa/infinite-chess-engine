@@ -13,6 +13,7 @@ const sprtConcurrencyEl = document.getElementById('sprtConcurrency');
 const sprtMinGames = document.getElementById('sprtMinGames');
 const sprtMaxGames = document.getElementById('sprtMaxGames');
 const sprtMaxMoves = document.getElementById('sprtMaxMoves');
+const sprtMaterialThresholdEl = document.getElementById('sprtMaterialThreshold');
 const runSprtBtn = document.getElementById('runSprt');
 const stopSprtBtn = document.getElementById('stopSprt');
 const sprtWinsEl = document.getElementById('sprtWins');
@@ -56,6 +57,7 @@ const CONFIG = {
     minGames: 500,
     maxMoves: 200,
     concurrency: 1,
+    materialThreshold: 1500,
 };
 
 const WHITE_FIRST_MOVES = [
@@ -129,19 +131,43 @@ function getStandardPosition() {
         pieces.push({ x: String(i), y: '7', piece_type: 'p', player: 'b' });
     }
 
+    // Standard infinite-chess special rights: all pawns (double-step)
+    // plus kings and rooks.
+    const special_rights = [];
+    for (let i = 1; i <= 8; i++) {
+        special_rights.push(i + ',2'); // white pawns
+        special_rights.push(i + ',7'); // black pawns
+    }
+    // White rooks and king
+    special_rights.push('1,1');
+    special_rights.push('8,1');
+    special_rights.push('5,1');
+    // Black rooks and king
+    special_rights.push('1,8');
+    special_rights.push('8,8');
+    special_rights.push('5,8');
+
     return {
         board: { pieces: pieces },
+        // Starting side; Engine::new will infer current turn from move_history.
         turn: 'w',
+        // Support both old and new APIs in the browser sanity test as well.
         castling_rights: [],
+        special_rights,
         en_passant: null,
         halfmove_clock: 0,
         fullmove_number: 1,
-        move_history: []
+        move_history: [],
+        game_rules: null,
+        world_bounds: null,
     };
 }
 
 // Generate a simple ICN string for a standard Classical game from worker log lines
-function generateICNFromWorkerLog(workerLog, gameIndex, result) {
+// newPlaysWhite indicates which engine (new vs old) had White.
+// endReason may be 'material_adjudication' or null.
+// materialThreshold is the cp threshold used for adjudication, if any.
+function generateICNFromWorkerLog(workerLog, gameIndex, result, newPlaysWhite, endReason, materialThreshold) {
     const utc = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     const utcDate = `${utc.getUTCFullYear()}.${pad(utc.getUTCMonth() + 1)}.${pad(utc.getUTCDate())}`;
@@ -153,7 +179,10 @@ function generateICNFromWorkerLog(workerLog, gameIndex, result) {
     else if (result === 'loss') resultToken = '0-1';
     else if (result === 'draw') resultToken = '1/2-1/2';
 
-    const headers = [
+    const whiteEngine = newPlaysWhite ? 'HydroChess New' : 'HydroChess Old';
+    const blackEngine = newPlaysWhite ? 'HydroChess Old' : 'HydroChess New';
+
+    const headerList = [
         `[Event "SPRT Test Game ${gameIndex}"]`,
         `[Site "https://www.infinitechess.org/"]`,
         `[Variant "Classical"]`,
@@ -161,15 +190,28 @@ function generateICNFromWorkerLog(workerLog, gameIndex, result) {
         `[UTCDate "${utcDate}"]`,
         `[UTCTime "${utcTime}"]`,
         `[Result "${resultToken}"]`,
-        `[TimeControl "-"]`
-    ].join(' ');
+        `[TimeControl "-"]`,
+        `[White "${whiteEngine}"]`,
+        `[Black "${blackEngine}"]`,
+    ];
+
+    if (endReason === 'material_adjudication') {
+        const th = typeof materialThreshold === 'number' && materialThreshold > 0 ? materialThreshold : 1500;
+        headerList.push(`[Termination "Material adjudication (|eval| >= ${th} cp)"]`);
+    }
+
+    const headers = headerList.join(' ');
 
     // Standard turn order / move counters from move count
     const lines = (workerLog || '').split('\n').filter(l => l.trim().length > 0 && (l.startsWith('W:') || l.startsWith('B:')));
     const moveCount = lines.length;
     const lastSide = moveCount > 0 ? (lines[moveCount - 1].startsWith('W:') ? 'w' : 'b') : 'b';
-    const nextTurn = lastSide === 'w' ? 'b' : 'w';
-    const fullmove = Math.floor(moveCount / 2) + 1;
+    // ICN here encodes the START position (standard classical), so we keep
+    // the header state fixed at the initial values: White to move, zero
+    // halfmove clock, and fullmove number 1. The move list then describes
+    // the history from that start.
+    const nextTurn = 'w';
+    const fullmove = 1;
     const halfmove = 0;
 
     // Standard Classical starting position pieces (using coords x,y and simple abbreviations)
@@ -449,7 +491,7 @@ async function runSprt() {
                     const msg = e.data;
                     if (msg.type === 'result') {
                         const result = msg.result;
-                        const icnLog = generateICNFromWorkerLog(msg.log, msg.gameIndex, result);
+                        const icnLog = generateICNFromWorkerLog(msg.log, msg.gameIndex, result, msg.newPlaysWhite, msg.reason);
                         gameLogs.push(icnLog);
 
                         if (result === 'win') wins++;

@@ -42,29 +42,10 @@ impl TranspositionTable {
         }
     }
     
-    /// Generate a hash for the current board position (infinite chess adapted)
+    /// Get the hash for the current position (uses incrementally maintained hash)
+    #[inline]
     pub fn generate_hash(game: &GameState) -> u64 {
-        let mut hash: u64 = 0;
-        
-        for ((x, y), piece) in &game.board.pieces {
-            // Normalize coordinates for hashing (handle large coords)
-            let norm_x = normalize_coord(*x);
-            let norm_y = normalize_coord(*y);
-            
-            // Combine coordinates
-            let coord_hash = (norm_x as u64) ^ ((norm_y as u64) << 16);
-            
-            // Mix with piece type and color
-            let piece_val = (piece.piece_type as u64) | ((piece.color as u64) << 8);
-            let mixed = mix_bits(coord_hash ^ piece_val);
-            
-            hash ^= mixed;
-        }
-        
-        // Mix in the turn
-        hash ^= (game.turn as u64) * 0x9E3779B97F4A7C15;
-        
-        mix_bits(hash)
+        game.hash
     }
     
     /// Probe the TT for a position
@@ -151,27 +132,4 @@ impl TranspositionTable {
         self.table.clear();
         self.age = 0;
     }
-}
-
-/// Normalize coordinate for hashing (handle infinite board)
-#[inline]
-fn normalize_coord(coord: i64) -> i32 {
-    const BOUND: i64 = 150;
-    const BUCKETS: i64 = 8;
-    
-    if coord.abs() <= BOUND {
-        coord as i32
-    } else {
-        let sign = coord.signum();
-        let delta = (coord - sign * BOUND) % BUCKETS;
-        (sign * BOUND + delta) as i32
-    }
-}
-
-/// Bit mixing function for better hash distribution
-#[inline]
-fn mix_bits(mut n: u64) -> u64 {
-    n = (n ^ (n >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-    n = (n ^ (n >> 27)).wrapping_mul(0x94d049bb133111eb);
-    n ^ (n >> 31)
 }

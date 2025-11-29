@@ -7,6 +7,5 @@
   "scripts": {
     "dev": "node sprt.js"
   },
-  "keywords": ["chess", "engine", "sprt", "testing"],
-  "license": "MIT"
+  "keywords": ["chess", "engine", "sprt", "testing"]
 }

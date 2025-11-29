@@ -16,9 +16,11 @@ pub fn sort_moves(searcher: &Searcher, game: &GameState, moves: &mut Vec<Move>, 
             }
         }
         
-        // Captures (MVV-LVA)
+        // Captures (MVV-LVA + capture history)
         if let Some(target) = game.board.get_piece(&m.to.x, &m.to.y) {
-            score -= get_piece_value(target.piece_type) * 10 - get_piece_value(m.piece.piece_type);
+            let mvv_lva = get_piece_value(target.piece_type) * 10 - get_piece_value(m.piece.piece_type);
+            let cap_hist = searcher.capture_history[m.piece.piece_type as usize][target.piece_type as usize];
+            score -= mvv_lva + cap_hist / 100;
         }
         
         // Killer moves
@@ -45,6 +47,7 @@ pub fn sort_captures(game: &GameState, moves: &mut Vec<Move>) {
     moves.sort_by_cached_key(|m| {
         let mut score = 0;
         if let Some(target) = game.board.get_piece(&m.to.x, &m.to.y) {
+            // MVV-LVA: prioritize capturing high value pieces with low value attackers
             score -= get_piece_value(target.piece_type) * 10 - get_piece_value(m.piece.piece_type);
         }
         score

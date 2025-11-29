@@ -12,13 +12,7 @@ pub mod search;
 use board::{Board, Piece, PieceType, PlayerColor, Coordinate};
 use game::{GameState, EnPassantState};
 use evaluation::calculate_initial_material;
-use crate::moves::set_world_bounds;
-
-// When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
-// allocator.
-#[cfg(feature = "wee_alloc")]
-#[global_allocator]
-static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+use crate::moves::{set_world_bounds, SpatialIndices};
 
 #[wasm_bindgen]
 extern "C" {
@@ -194,10 +188,13 @@ impl Engine {
                 }
             });
             
-            GameRules {
+            let mut rules = GameRules {
                 promotion_ranks,
+                promotion_types: None,
                 promotions_allowed: js_rules.promotions_allowed,
-            }
+            };
+            rules.init_promotion_types();
+            rules
         } else {
             game::GameRules::default()
         };
@@ -215,14 +212,20 @@ impl Engine {
             fullmove_number: 1,
             material_score: 0,
             game_rules,
+            hash: 0, // Will be computed below
             hash_stack: Vec::with_capacity(js_game.move_history.len().saturating_add(8)),
             null_moves: 0,
             white_piece_count: 0,
             black_piece_count: 0,
+            white_pieces: Vec::new(),
+            black_pieces: Vec::new(),
+            spatial_indices: SpatialIndices::default(),
         };
 
         game.material_score = calculate_initial_material(&game.board);
-        
+        game.recompute_piece_counts(); // Rebuild piece lists and counts
+        game.recompute_hash(); // Compute initial hash from position
+
         // Helper to parse "x,y" into (i64, i64)
         fn parse_coords(coord_str: &str) -> Option<(i64, i64)> {
             let parts: Vec<&str> = coord_str.split(',').collect();
@@ -257,11 +260,32 @@ impl Engine {
     }
 
     pub fn get_best_move(&mut self) -> JsValue {
+        // console log all legal moves in the position
+        let moves = self.game.get_legal_moves();
+        for m in &moves {
+            let piece_code = m.piece.piece_type.to_str();
+            let color_code = m.piece.color.to_str();
+            let promo_part = match m.promotion {
+                Some(p) => format!(" promo={}", p.to_str()),
+                None => String::new(),
+            };
+            let line = format!(
+                "{}{}: ({},{}) -> ({},{}){}",
+                color_code,
+                piece_code,
+                m.from.x,
+                m.from.y,
+                m.to.x,
+                m.to.y,
+                promo_part,
+            );
+            web_sys::console::debug_1(&JsValue::from(line));
+        }
         if let Some(best_move) = search::get_best_move(&mut self.game, 50) {
             let js_move = JsMove {
                 from: format!("{},{}", best_move.from.x, best_move.from.y),
                 to: format!("{},{}", best_move.to.x, best_move.to.y),
-                promotion: best_move.promotion.clone(),
+                promotion: best_move.promotion.map(|p| p.to_str().to_string()),
             };
             serde_wasm_bindgen::to_value(&js_move).unwrap()
         } else {
@@ -279,7 +303,7 @@ impl Engine {
             let js_move = JsMove {
                 from: format!("{},{}", best_move.from.x, best_move.from.y),
                 to: format!("{},{}", best_move.to.x, best_move.to.y),
-                promotion: best_move.promotion.clone(),
+                promotion: best_move.promotion.map(|p| p.to_str().to_string()),
             };
             serde_wasm_bindgen::to_value(&js_move).unwrap()
         } else {
@@ -309,7 +333,7 @@ impl Engine {
                 legal_moves.push(JsMove {
                     from: format!("{},{}", m.from.x, m.from.y),
                     to: format!("{},{}", m.to.x, m.to.y),
-                    promotion: m.promotion.clone(),
+                    promotion: m.promotion.map(|p| p.to_str().to_string()),
                 });
             }
         }
