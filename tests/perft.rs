@@ -205,15 +205,15 @@ fn compare_evasion_generators_depth_5() {
 
 /// Run a single search test and return (total_nodes, total_micros, depth7_nodes, depth7_micros)
 fn run_single_search_test(max_depth: usize) -> (u128, u128, u64, u128) {
-    let mut game = GameState::new();
-    game.setup_standard_chess();
-
     let mut total_nodes: u128 = 0;
     let mut total_micros: u128 = 0;
     let mut depth7_nodes: u64 = 0;
     let mut depth7_micros: u128 = 0;
 
     for depth in 1..=max_depth {
+        let mut game = GameState::new();
+        game.setup_standard_chess();
+
         let search_start = Instant::now();
         let searched_nodes = negamax_node_count_for_depth(&mut game, depth);
         let search_micros = search_start.elapsed().as_micros().max(1);

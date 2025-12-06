@@ -59,7 +59,9 @@ mod tt;
 pub use tt::{TTEntry, TTFlag, TranspositionTable};
 
 mod ordering;
-use ordering::{hash_move_dest, hash_move_from, sort_captures, sort_moves, sort_moves_root};
+use ordering::{
+    hash_coord_32, hash_move_dest, hash_move_from, sort_captures, sort_moves, sort_moves_root,
+};
 
 mod see;
 pub(crate) use see::static_exchange_eval_impl as static_exchange_eval;
@@ -163,6 +165,16 @@ pub struct Searcher {
 
     // Per-ply reusable move buffers to avoid Vec allocations in the search
     pub move_buffers: Vec<Vec<Move>>,
+
+    // Move history stack for continuation history (move at each ply)
+    pub move_history: Vec<Option<Move>>,
+
+    // Moved piece history stack (piece type that moved at each ply)
+    pub moved_piece_history: Vec<u8>,
+
+    // Continuation history: [prev_piece_type][prev_to_hash][cur_from_hash][cur_to_hash]
+    // Using smaller dimensions (16*32*32*32*4 = 2MB) to fit in WASM memory
+    pub cont_history: Vec<[[[i32; 32]; 32]; 32]>,
 }
 
 impl Searcher {
@@ -206,6 +218,9 @@ impl Searcher {
             prev_score: 0,
             silent: false,
             move_buffers,
+            move_history: vec![None; MAX_PLY],
+            moved_piece_history: vec![0; MAX_PLY],
+            cont_history: vec![[[[0i32; 32]; 32]; 32]; 16],
         }
     }
 
@@ -876,7 +891,7 @@ fn negamax(
     let mut legal_moves = 0;
     let mut hash_flag = TTFlag::UpperBound;
     // Track quiet moves searched at this node for history maluses
-    let mut quiets_searched: Vec<(PieceType, usize)> = Vec::new();
+    let mut quiets_searched: Vec<Move> = Vec::new();
 
     // Futility pruning flag
     let futility_pruning = !in_check && !is_pv && depth <= 3;
@@ -918,8 +933,7 @@ fn negamax(
 
         // Record quiet moves searched at this node for history maluses
         if !is_capture && !is_promotion {
-            let idx = hash_move_dest(m);
-            quiets_searched.push((m.piece.piece_type, idx));
+            quiets_searched.push(m.clone());
         }
 
         // For this node at `ply`, this move becomes the previous move for child
@@ -928,6 +942,12 @@ fn negamax(
         let from_hash = hash_move_from(m);
         let to_hash = hash_move_dest(m);
         searcher.prev_move_stack[ply] = (from_hash, to_hash);
+
+        // Store move and piece info for continuation history
+        let move_history_backup = searcher.move_history[ply].take();
+        let piece_history_backup = searcher.moved_piece_history[ply];
+        searcher.move_history[ply] = Some(m.clone());
+        searcher.moved_piece_history[ply] = m.piece.piece_type as u8;
 
         legal_moves += 1;
 
@@ -1011,6 +1031,8 @@ fn negamax(
 
         // Restore previous-move stack entry for this ply after child returns.
         searcher.prev_move_stack[ply] = prev_entry_backup;
+        searcher.move_history[ply] = move_history_backup;
+        searcher.moved_piece_history[ply] = piece_history_backup;
 
         if searcher.stopped {
             return best_score;
@@ -1041,13 +1063,17 @@ fn negamax(
                 // History bonus for quiet cutoff move, with maluses for previously searched quiets
                 let idx = hash_move_dest(m);
                 let bonus = 300 * depth as i32 - 250;
+                let adj = bonus.min(1536);
+                let max_history: i32 = 16384;
+
                 searcher.update_history(m.piece.piece_type, idx, bonus);
 
-                for &(ptype, hidx) in &quiets_searched {
-                    if ptype == m.piece.piece_type && hidx == idx {
+                for quiet in &quiets_searched {
+                    let qidx = hash_move_dest(quiet);
+                    if quiet.piece.piece_type == m.piece.piece_type && qidx == idx {
                         continue;
                     }
-                    searcher.update_history(ptype, hidx, -bonus);
+                    searcher.update_history(quiet.piece.piece_type, qidx, -bonus);
                 }
 
                 // Killer move heuristic (for non-captures)
@@ -1061,6 +1087,35 @@ fn negamax(
                     if prev_from_hash < 256 && prev_to_hash < 256 {
                         searcher.countermoves[prev_from_hash][prev_to_hash] =
                             (m.piece.piece_type as u8, m.to.x as i16, m.to.y as i16);
+                    }
+                }
+
+                // Continuation history update (like Zig: 1-ply, 2-ply, 4-ply back)
+
+                for &plies_ago in &[0usize, 1, 3] {
+                    if ply >= plies_ago + 1 {
+                        if let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1] {
+                            let prev_piece =
+                                searcher.moved_piece_history[ply - plies_ago - 1] as usize;
+                            if prev_piece < 16 {
+                                let prev_to_hash = hash_coord_32(prev_move.to.x, prev_move.to.y);
+
+                                // Update all searched quiets (best with bonus, others with malus)
+                                for quiet in &quiets_searched {
+                                    let q_from_hash = hash_coord_32(quiet.from.x, quiet.from.y);
+                                    let q_to_hash = hash_coord_32(quiet.to.x, quiet.to.y);
+                                    let is_best = quiet.from == m.from && quiet.to == m.to;
+
+                                    let entry = &mut searcher.cont_history[prev_piece]
+                                        [prev_to_hash][q_from_hash][q_to_hash];
+                                    if is_best {
+                                        *entry += adj - *entry * adj / max_history;
+                                    } else {
+                                        *entry += -adj - *entry * adj / max_history;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             } else if let Some(cap_type) = captured_type {

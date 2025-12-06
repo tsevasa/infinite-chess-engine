@@ -63,7 +63,7 @@ pub fn sort_moves(
                 searcher.capture_history[m.piece.piece_type as usize][target.piece_type as usize];
             score += cap_hist / 10;
         } else {
-            // Quiet move: killers + countermove + history
+            // Quiet move: killers + countermove + history + continuation history
             if searcher.killers[ply][0].as_ref().map_or(false, |k| {
                 m.from == k.from && m.to == k.to && m.promotion == k.promotion
             }) {
@@ -86,11 +86,30 @@ pub fn sort_moves(
                     }
                 }
                 score += SORT_QUIET;
-            }
 
-            let idx = hash_move_dest(m);
-            let history_score = searcher.history[m.piece.piece_type as usize][idx];
-            score += history_score;
+                // Main history heuristic
+                let idx = hash_move_dest(m);
+                score += searcher.history[m.piece.piece_type as usize][idx];
+
+                // Continuation history: [prev_piece][prev_to][cur_from][cur_to]
+                // Use 1-ply, 2-ply, and 4-ply back (like Zig: plies_ago = 0, 1, 3)
+                let cur_from_hash = hash_coord_32(m.from.x, m.from.y);
+                let cur_to_hash = hash_coord_32(m.to.x, m.to.y);
+
+                for &plies_ago in &[0usize, 1, 3] {
+                    if ply >= plies_ago + 1 {
+                        if let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1] {
+                            let prev_piece =
+                                searcher.moved_piece_history[ply - plies_ago - 1] as usize;
+                            if prev_piece < 16 {
+                                let prev_to_hash = hash_coord_32(prev_move.to.x, prev_move.to.y);
+                                score += searcher.cont_history[prev_piece][prev_to_hash]
+                                    [cur_from_hash][cur_to_hash];
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // We sort by ascending key, so negate to get highest-score moves first.
@@ -118,12 +137,26 @@ pub fn sort_captures(game: &GameState, moves: &mut Vec<Move>) {
     });
 }
 
+/// Hash move destination to 256-size index (for main history)
+/// Uses wrapping_abs to safely handle negative coordinates in infinite chess
 #[inline]
 pub fn hash_move_dest(m: &Move) -> usize {
-    ((m.to.x ^ m.to.y) & 0xFF) as usize
+    ((m.to.x.wrapping_abs() ^ m.to.y.wrapping_abs()) & 0xFF) as usize
 }
 
+/// Hash move source to 256-size index
 #[inline]
 pub fn hash_move_from(m: &Move) -> usize {
-    ((m.from.x ^ m.from.y) & 0xFF) as usize
+    // Use wrapping for consistency with infinite coordinates
+    ((m.from.x.wrapping_abs() ^ m.from.y.wrapping_abs()) & 0xFF) as usize
+}
+
+/// Hash coordinate to 32-size index (for continuation history)
+/// Uses wrapping_abs to safely handle negative coordinates in infinite chess
+#[inline]
+pub fn hash_coord_32(x: i64, y: i64) -> usize {
+    // Use wrapping operations to avoid issues with i64::MIN
+    let ux = x.wrapping_abs() as u64;
+    let uy = y.wrapping_abs() as u64;
+    ((ux ^ uy) & 0x1F) as usize
 }
