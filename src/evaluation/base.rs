@@ -186,7 +186,7 @@ pub fn compute_cloud_center(board: &Board) -> Option<Coordinate> {
     let mut count: i64 = 0;
 
     for ((x, y), piece) in &board.pieces {
-        if piece.piece_type != PieceType::Void && piece.piece_type != PieceType::Obstacle {
+        if piece.piece_type() != PieceType::Void && piece.piece_type() != PieceType::Obstacle {
             sum_x += *x;
             sum_y += *y;
             count += 1;
@@ -280,12 +280,12 @@ pub fn evaluate_pieces(
 
     let cloud_center: Option<Coordinate> = compute_cloud_center(&game.board);
     for ((x, y), piece) in &game.board.pieces {
-        let mut piece_score = match piece.piece_type {
-            PieceType::Rook => evaluate_rook(game, *x, *y, piece.color, white_king, black_king),
-            PieceType::Queen => evaluate_queen(game, *x, *y, piece.color, white_king, black_king),
-            PieceType::Knight => evaluate_knight(*x, *y, piece.color, black_king, white_king),
+        let mut piece_score = match piece.piece_type() {
+            PieceType::Rook => evaluate_rook(game, *x, *y, piece.color(), white_king, black_king),
+            PieceType::Queen => evaluate_queen(game, *x, *y, piece.color(), white_king, black_king),
+            PieceType::Knight => evaluate_knight(*x, *y, piece.color(), black_king, white_king),
             PieceType::Bishop => {
-                if piece.color == PlayerColor::White {
+                if piece.color() == PlayerColor::White {
                     white_bishops += 1;
                     if (*x + *y) % 2 == 0 {
                         white_bishop_colors.0 = true;
@@ -300,44 +300,44 @@ pub fn evaluate_pieces(
                         black_bishop_colors.1 = true;
                     }
                 }
-                evaluate_bishop(game, *x, *y, piece.color, white_king, black_king)
+                evaluate_bishop(game, *x, *y, piece.color(), white_king, black_king)
             }
             PieceType::Pawn => {
-                evaluate_pawn_position(*x, *y, piece.color, white_promo_rank, black_promo_rank)
+                evaluate_pawn_position(*x, *y, piece.color(), white_promo_rank, black_promo_rank)
             }
 
             // ===== Fairy Pieces =====
 
             // Chancellor (R+N): Inherit rook logic scaled
             PieceType::Chancellor => {
-                let rook_eval = evaluate_rook(game, *x, *y, piece.color, white_king, black_king);
-                let knight_eval = evaluate_knight(*x, *y, piece.color, black_king, white_king);
+                let rook_eval = evaluate_rook(game, *x, *y, piece.color(), white_king, black_king);
+                let knight_eval = evaluate_knight(*x, *y, piece.color(), black_king, white_king);
                 (rook_eval * CHANCELLOR_ROOK_SCALE / 100) + (knight_eval / 2)
             }
 
             // Archbishop (B+N): Inherit bishop logic scaled
             PieceType::Archbishop => {
                 let bishop_eval =
-                    evaluate_bishop(game, *x, *y, piece.color, white_king, black_king);
-                let knight_eval = evaluate_knight(*x, *y, piece.color, black_king, white_king);
+                    evaluate_bishop(game, *x, *y, piece.color(), white_king, black_king);
+                let knight_eval = evaluate_knight(*x, *y, piece.color(), black_king, white_king);
                 (bishop_eval * ARCHBISHOP_BISHOP_SCALE / 100) + (knight_eval / 2)
             }
 
             // Amazon (Q+N): Inherit both queen and rook logic
             PieceType::Amazon => {
-                let queen_eval = evaluate_queen(game, *x, *y, piece.color, white_king, black_king);
-                let rook_eval = evaluate_rook(game, *x, *y, piece.color, white_king, black_king);
+                let queen_eval = evaluate_queen(game, *x, *y, piece.color(), white_king, black_king);
+                let rook_eval = evaluate_rook(game, *x, *y, piece.color(), white_king, black_king);
                 (queen_eval * AMAZON_QUEEN_SCALE / 100) + (rook_eval * AMAZON_ROOK_SCALE / 100)
             }
 
             // RoyalQueen: Same as queen
             PieceType::RoyalQueen => {
-                evaluate_queen(game, *x, *y, piece.color, white_king, black_king)
+                evaluate_queen(game, *x, *y, piece.color(), white_king, black_king)
             }
 
             // Knightrider: Knight-ray mobility
             PieceType::Knightrider => {
-                evaluate_knightrider(*x, *y, piece.color, white_king, black_king, &game.board)
+                evaluate_knightrider(*x, *y, piece.color(), white_king, black_king, &game.board)
             }
 
             // Leapers (Hawk, Rose, Camel, Giraffe, Zebra, Centaur): Tropism-based positioning
@@ -348,24 +348,24 @@ pub fn evaluate_pieces(
             | PieceType::Zebra => evaluate_leaper_positioning(
                 *x,
                 *y,
-                piece.color,
+                piece.color(),
                 white_king,
                 black_king,
                 cloud_center.as_ref(),
-                get_piece_value(piece.piece_type),
+                get_piece_value(piece.piece_type()),
             ),
 
             // Centaur / RoyalCentaur: Knight + King movement, use knight eval + leaper positioning
             PieceType::Centaur | PieceType::RoyalCentaur => {
-                let knight_eval = evaluate_knight(*x, *y, piece.color, black_king, white_king);
+                let knight_eval = evaluate_knight(*x, *y, piece.color(), black_king, white_king);
                 let leaper_eval = evaluate_leaper_positioning(
                     *x,
                     *y,
-                    piece.color,
+                    piece.color(),
                     white_king,
                     black_king,
                     cloud_center.as_ref(),
-                    get_piece_value(piece.piece_type),
+                    get_piece_value(piece.piece_type()),
                 );
                 (knight_eval * 80 / 100) + leaper_eval
             }
@@ -374,7 +374,7 @@ pub fn evaluate_pieces(
             PieceType::Huygen => evaluate_leaper_positioning(
                 *x,
                 *y,
-                piece.color,
+                piece.color(),
                 white_king,
                 black_king,
                 cloud_center.as_ref(),
@@ -385,7 +385,7 @@ pub fn evaluate_pieces(
             PieceType::Guard => evaluate_leaper_positioning(
                 *x,
                 *y,
-                piece.color,
+                piece.color(),
                 white_king,
                 black_king,
                 cloud_center.as_ref(),
@@ -401,7 +401,7 @@ pub fn evaluate_pieces(
             if cheb > PIECE_CLOUD_CHEB_RADIUS {
                 let excess =
                     (cheb - PIECE_CLOUD_CHEB_RADIUS).min(PIECE_CLOUD_CHEB_MAX_EXCESS) as i32;
-                let penalty = match piece.piece_type {
+                let penalty = match piece.piece_type() {
                     PieceType::Queen | PieceType::RoyalQueen => QUEEN_CLOUD_PENALTY,
                     PieceType::Rook | PieceType::Chancellor | PieceType::Amazon => {
                         ROOK_CLOUD_PENALTY
@@ -417,15 +417,15 @@ pub fn evaluate_pieces(
         // have never left their original starting square. This encourages
         // getting pieces out at least once, without over-penalizing pieces
         // that operate from the back rank later.
-        if piece.piece_type != PieceType::Pawn && !piece.piece_type.is_royal() {
+        if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
             if game.starting_squares.contains(&Coordinate::new(*x, *y)) {
-                let base_val = get_piece_value(piece.piece_type).max(0);
+                let base_val = get_piece_value(piece.piece_type()).max(0);
                 let penalty = base_val / 100;
                 piece_score -= penalty;
             }
         }
 
-        if piece.color == PlayerColor::White {
+        if piece.color() == PlayerColor::White {
             score += piece_score;
         } else {
             score -= piece_score;
@@ -997,10 +997,10 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
             let cx = king.x + dx;
             let cy = king.y + dy;
             if let Some(piece) = game.board.get_piece(&cx, &cy) {
-                if piece.color == color {
-                    if piece.piece_type == PieceType::Pawn
-                        || piece.piece_type == PieceType::Guard
-                        || piece.piece_type == PieceType::Void
+                if piece.color() == color {
+                    if piece.piece_type() == PieceType::Pawn
+                        || piece.piece_type() == PieceType::Guard
+                        || piece.piece_type() == PieceType::Void
                     {
                         has_ring_cover = true;
                     }
@@ -1018,7 +1018,7 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
     let mut has_pawn_ahead = false;
     let mut has_pawn_behind = false;
     for ((px, py), piece) in &game.board.pieces {
-        if piece.color != color || piece.piece_type != PieceType::Pawn {
+        if piece.color() != color || piece.piece_type() != PieceType::Pawn {
             continue;
         }
 
@@ -1076,7 +1076,7 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
             cy += dy;
             if let Some(piece) = game.board.get_piece(&cx, &cy) {
                 // Friendly piece stops the ray and provides some cover
-                if piece.color == color {
+                if piece.color() == color {
                     ray_open = false;
                 }
                 break;
@@ -1091,11 +1091,11 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
     // 3. Enemy sliders attacking king zone
     let mut enemy_slider_threats = 0;
     for ((x, y), piece) in &game.board.pieces {
-        if piece.color == color {
+        if piece.color() == color {
             continue;
         }
 
-        match piece.piece_type {
+        match piece.piece_type() {
             PieceType::Rook | PieceType::Bishop | PieceType::Queen | PieceType::Amazon => {
                 // First check: is the slider even roughly in line with the king?
                 let dx = x - king.x;
@@ -1143,8 +1143,8 @@ pub fn evaluate_pawn_structure(game: &GameState) -> i32 {
     let mut black_pawns: Vec<(i64, i64)> = Vec::new();
 
     for ((x, y), piece) in &game.board.pieces {
-        if piece.piece_type == PieceType::Pawn {
-            if piece.color == PlayerColor::White {
+        if piece.piece_type() == PieceType::Pawn {
+            if piece.color() == PlayerColor::White {
                 white_pawn_files.push(*x);
                 white_pawns.push((*x, *y));
             } else {
@@ -1221,8 +1221,8 @@ pub fn find_kings(board: &Board) -> (Option<Coordinate>, Option<Coordinate>) {
     let mut black_king: Option<Coordinate> = None;
 
     for ((x, y), piece) in &board.pieces {
-        if piece.piece_type == PieceType::King {
-            if piece.color == PlayerColor::White {
+        if piece.piece_type() == PieceType::King {
+            if piece.color() == PlayerColor::White {
                 white_king = Some(Coordinate { x: *x, y: *y });
             } else {
                 black_king = Some(Coordinate { x: *x, y: *y });
@@ -1236,7 +1236,7 @@ pub fn find_kings(board: &Board) -> (Option<Coordinate>, Option<Coordinate>) {
 /// Check if a side only has a king (no other pieces)
 pub fn is_lone_king(board: &Board, color: PlayerColor) -> bool {
     for (_, piece) in &board.pieces {
-        if piece.color == color && piece.piece_type != PieceType::King {
+        if piece.color() == color && piece.piece_type() != PieceType::King {
             return false;
         }
     }
@@ -1250,8 +1250,8 @@ pub fn count_pawns_on_file(game: &GameState, file: i64, color: PlayerColor) -> (
     let mut enemy_pawns = 0;
 
     for ((x, _), piece) in &game.board.pieces {
-        if *x == file && piece.piece_type == PieceType::Pawn {
-            if piece.color == color {
+        if *x == file && piece.piece_type() == PieceType::Pawn {
+            if piece.color() == color {
                 own_pawns += 1;
             } else {
                 enemy_pawns += 1;
@@ -1361,10 +1361,10 @@ pub fn evaluate_lone_king_endgame(
     let mut sliders: Vec<SliderInfo> = Vec::new();
 
     for ((x, y), piece) in &game.board.pieces {
-        if piece.color != winning_color || piece.piece_type.is_royal() {
+        if piece.color() != winning_color || piece.piece_type().is_royal() {
             continue;
         }
-        match piece.piece_type {
+        match piece.piece_type() {
             PieceType::Rook | PieceType::Chancellor | PieceType::Queen | PieceType::Amazon => {
                 sliders.push(SliderInfo { x: *x, y: *y });
             }
@@ -1659,14 +1659,14 @@ pub fn evaluate_lone_king_endgame(
     let short_base_scale: i32 = if few_sliders { 6 } else { 3 };
 
     for ((px, py), piece) in &game.board.pieces {
-        if piece.color != winning_color {
+        if piece.color() != winning_color {
             continue;
         }
 
         // Skip long-range sliders here; they are already handled by the
         // sandwich/fence logic above.
         let is_slider_piece = matches!(
-            piece.piece_type,
+            piece.piece_type(),
             PieceType::Rook
                 | PieceType::Chancellor
                 | PieceType::Queen
@@ -1683,7 +1683,7 @@ pub fn evaluate_lone_king_endgame(
 
         // King proximity is already handled by the king-involvement logic
         // above; avoid double-counting it here.
-        if piece.piece_type == PieceType::King {
+        if piece.piece_type() == PieceType::King {
             continue;
         }
 
@@ -1695,7 +1695,7 @@ pub fn evaluate_lone_king_endgame(
         }
 
         // Scale more strongly for true short-range attackers.
-        let piece_scale: i32 = match piece.piece_type {
+        let piece_scale: i32 = match piece.piece_type() {
             PieceType::Guard | PieceType::Centaur | PieceType::RoyalCentaur => 3,
             PieceType::Knight | PieceType::Camel | PieceType::Giraffe | PieceType::Zebra => 3,
             PieceType::Hawk | PieceType::Rose => 2,
@@ -1722,10 +1722,10 @@ fn needs_king_for_mate(board: &Board, color: PlayerColor) -> bool {
     let mut guards = 0;
 
     for (_, piece) in &board.pieces {
-        if piece.color != color {
+        if piece.color() != color {
             continue;
         }
-        match piece.piece_type {
+        match piece.piece_type() {
             PieceType::Queen | PieceType::RoyalQueen => queens += 1,
             PieceType::Rook => rooks += 1,
             PieceType::Bishop => bishops += 1,
@@ -1826,10 +1826,10 @@ pub fn has_sufficient_mating_material(
     let mut dark_bishops = 0;
 
     for ((x, y), piece) in &board.pieces {
-        if piece.color != color {
+        if piece.color() != color {
             continue;
         }
-        match piece.piece_type {
+        match piece.piece_type() {
             PieceType::Queen | PieceType::RoyalQueen => queens += 1,
             PieceType::Rook => rooks += 1,
             PieceType::Bishop => {
@@ -2214,11 +2214,11 @@ pub fn is_insufficient_material(board: &Board) -> bool {
     let white_has_king = board
         .pieces
         .iter()
-        .any(|(_, p)| p.piece_type.is_royal() && p.color == PlayerColor::White);
+        .any(|(_, p)| p.piece_type().is_royal() && p.color() == PlayerColor::White);
     let black_has_king = board
         .pieces
         .iter()
-        .any(|(_, p)| p.piece_type.is_royal() && p.color == PlayerColor::Black);
+        .any(|(_, p)| p.piece_type().is_royal() && p.color() == PlayerColor::Black);
 
     let white_can_mate = has_sufficient_mating_material(board, PlayerColor::White, white_has_king);
     let black_can_mate = has_sufficient_mating_material(board, PlayerColor::Black, black_has_king);
@@ -2230,8 +2230,8 @@ pub fn is_insufficient_material(board: &Board) -> bool {
 pub fn calculate_initial_material(board: &Board) -> i32 {
     let mut score = 0;
     for (_, piece) in &board.pieces {
-        let value = get_piece_value(piece.piece_type);
-        match piece.color {
+        let value = get_piece_value(piece.piece_type());
+        match piece.color() {
             PlayerColor::White => score += value,
             PlayerColor::Black => score -= value,
             PlayerColor::Neutral => {}

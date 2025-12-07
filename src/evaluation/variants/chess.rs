@@ -158,7 +158,7 @@ fn on_board(x: i64, y: i64) -> bool {
 fn get_phase(game: &GameState) -> i32 {
     let mut phase = 0;
     for (_, piece) in &game.board.pieces {
-        match piece.piece_type {
+        match piece.piece_type() {
             PieceType::Knight | PieceType::Bishop => phase += 1,
             PieceType::Rook => phase += 2,
             PieceType::Queen => phase += 4,
@@ -186,16 +186,16 @@ pub fn evaluate(game: &GameState) -> i32 {
 
     // Main piece loop
     for ((x, y), piece) in &game.board.pieces {
-        if piece.color == PlayerColor::Neutral || !on_board(*x, *y) {
+        if piece.color() == PlayerColor::Neutral || !on_board(*x, *y) {
             continue;
         }
 
-        let is_white = piece.color == PlayerColor::White;
+        let is_white = piece.color() == PlayerColor::White;
         let pst_idx = coord_to_pst_index(*x, *y);
         // For black: mirror the rank (XOR 56 flips rank 1<->8, 2<->7, etc.)
         let black_pst_idx = pst_idx ^ 56;
 
-        match piece.piece_type {
+        match piece.piece_type() {
             PieceType::Pawn => {
                 let pst_val = if is_white {
                     PAWN_PST[pst_idx]

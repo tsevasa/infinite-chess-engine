@@ -34,11 +34,19 @@ import { NativeWasmRunner, canUseNativeWasm } from './native_runner.mjs';
  */
 function hasIwasm() {
     try {
-        execSync('iwasm --version', { stdio: 'ignore' });
+        execSync('iwasm --version', { stdio: 'pipe' });
         return true;
     } catch {
         return false;
     }
+}
+
+/**
+ * Check if WASI-targeted WASM binary exists
+ */
+function hasWasiBinary() {
+    const wasmPath = join(ROOT_DIR, 'target', 'wasm32-wasip1', 'release', 'spsa_engine.wasm');
+    return existsSync(wasmPath);
 }
 
 import {
@@ -133,6 +141,11 @@ function parseArgs() {
             default: false,
             description: 'Force browser-based execution (Puppeteer)'
         })
+        .option('variant', {
+            type: 'string',
+            default: 'Classical',
+            description: 'Chess variant to use for testing'
+        })
         .help()
         .alias('help', 'h')
         .example('$0', 'Auto-resume or fresh start')
@@ -163,7 +176,8 @@ function parseArgs() {
         apply: argv.apply,
         revert: argv.revert,
         native: argv.native,
-        browser: argv.browser
+        browser: argv.browser,
+        variant: argv.variant
     };
 
     // Dynamic default for checkpoint: 5% of total iterations, min 1
@@ -425,9 +439,31 @@ function findLatestCheckpoint() {
 // Build Engine with search_tuning Feature
 // ============================================================================
 
-function buildEngine(forNodejs = false) {
-    const target = forNodejs ? 'nodejs' : 'web';
-    const outDir = forNodejs ? 'sprt/pkg-nodejs' : 'sprt/web/pkg-spsa';
+/**
+ * Build engine for WASI target (for iwasm native execution)
+ */
+function buildEngineWasi() {
+    console.log('🔨 Building engine with search_tuning feature (target: wasm32-wasip1 for iwasm)...');
+
+    try {
+        execSync(
+            'cargo build --target wasm32-wasip1 --release --bin spsa_engine --features search_tuning',
+            { cwd: ROOT_DIR, stdio: 'inherit' }
+        );
+        console.log('✅ WASI build complete');
+        return true;
+    } catch (e) {
+        console.error('❌ WASI build failed:', e.message);
+        return false;
+    }
+}
+
+/**
+ * Build engine for web/browser target (wasm-pack)
+ */
+function buildEngineWeb() {
+    const target = 'web';
+    const outDir = 'sprt/web/pkg-spsa';
 
     console.log(`🔨 Building engine with search_tuning feature (target: ${target})...`);
 
@@ -441,6 +477,14 @@ function buildEngine(forNodejs = false) {
     } catch (e) {
         console.error('❌ Build failed:', e.message);
         return false;
+    }
+}
+
+function buildEngine(useNative = false) {
+    if (useNative) {
+        return buildEngineWasi();
+    } else {
+        return buildEngineWeb();
     }
 }
 
@@ -607,12 +651,18 @@ async function runSPSA(options) {
         console.log('🌐 Using browser-based execution (--browser flag)');
         useNative = false;
     } else if (options.native) {
-        console.log('🚀 Using native Node.js WASM execution (--native flag)');
+        console.log('🚀 Using native iwasm execution (--native flag)');
         useNative = true;
     } else {
-        // Default to browser-based for now (native requires separate build)
-        console.log('🌐 Using browser-based execution');
-        useNative = false;
+        // Default: prefer iwasm if available for maximum performance
+        if (hasIwasm()) {
+            console.log('🚀 iwasm detected - using native execution for maximum performance');
+            useNative = true;
+        } else {
+            console.log('🌐 iwasm not found - using browser-based execution');
+            console.log('   Tip: Install iwasm for faster execution');
+            useNative = false;
+        }
     }
 
     // Build engine with appropriate target

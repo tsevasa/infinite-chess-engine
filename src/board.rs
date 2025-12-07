@@ -1,6 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+// ============================================================================
+// Number of piece types (for packed piece encoding)
+// ============================================================================
+
+/// Total number of piece types in the game (22 types: Void..Pawn)
+pub const NUM_PIECE_TYPES: u8 = 22;
+
+// ============================================================================
+// Coordinate
+// ============================================================================
+
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Coordinate {
     pub x: i64,
@@ -8,32 +19,40 @@ pub struct Coordinate {
 }
 
 impl Coordinate {
+    #[inline]
     pub fn new(x: i64, y: i64) -> Self {
         Coordinate { x, y }
     }
 
+    #[inline]
     pub fn get_x(&self) -> i64 {
         self.x
     }
 
+    #[inline]
     pub fn get_y(&self) -> i64 {
         self.y
     }
 }
 
+// ============================================================================
+// PlayerColor
+// ============================================================================
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum PlayerColor {
-    Neutral,
-    White,
-    Black,
+    Neutral = 0,
+    White = 1,
+    Black = 2,
 }
 
 impl PlayerColor {
     pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "n" => Some(PlayerColor::Neutral),
-            "w" => Some(PlayerColor::White),
-            "b" => Some(PlayerColor::Black),
+        match s.to_lowercase().as_str() {
+            "n" | "neutral" => Some(PlayerColor::Neutral),
+            "w" | "white" => Some(PlayerColor::White),
+            "b" | "black" => Some(PlayerColor::Black),
             _ => None,
         }
     }
@@ -46,6 +65,7 @@ impl PlayerColor {
         }
     }
 
+    #[inline]
     pub fn opponent(&self) -> Self {
         match self {
             PlayerColor::White => PlayerColor::Black,
@@ -53,32 +73,48 @@ impl PlayerColor {
             PlayerColor::Neutral => PlayerColor::Neutral,
         }
     }
+
+    /// Convert from u8
+    #[inline]
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => PlayerColor::Neutral,
+            1 => PlayerColor::White,
+            2 => PlayerColor::Black,
+            _ => PlayerColor::Neutral,
+        }
+    }
 }
 
+// ============================================================================
+// PieceType
+// ============================================================================
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum PieceType {
-    Void,
-    Obstacle,
-    King,
-    Giraffe,
-    Camel,
-    Zebra,
-    Knightrider,
-    Amazon,
-    Queen,
-    RoyalQueen,
-    Hawk,
-    Chancellor,
-    Archbishop,
-    Centaur,
-    RoyalCentaur,
-    Rose,
-    Knight,
-    Guard,
-    Huygen,
-    Rook,
-    Bishop,
-    Pawn,
+    Void = 0,
+    Obstacle = 1,
+    King = 2,
+    Giraffe = 3,
+    Camel = 4,
+    Zebra = 5,
+    Knightrider = 6,
+    Amazon = 7,
+    Queen = 8,
+    RoyalQueen = 9,
+    Hawk = 10,
+    Chancellor = 11,
+    Archbishop = 12,
+    Centaur = 13,
+    RoyalCentaur = 14,
+    Rose = 15,
+    Knight = 16,
+    Guard = 17,
+    Huygen = 18,
+    Rook = 19,
+    Bishop = 20,
+    Pawn = 21,
 }
 
 impl PieceType {
@@ -140,11 +176,13 @@ impl PieceType {
     }
 
     /// Check if this piece type is a neutral/blocking type (can't be moved by players)
+    #[inline]
     pub fn is_neutral_type(&self) -> bool {
         matches!(self, PieceType::Void | PieceType::Obstacle)
     }
 
     /// Check if this piece type is a royal (king-like) piece
+    #[inline]
     pub fn is_royal(&self) -> bool {
         matches!(
             self,
@@ -173,19 +211,108 @@ impl PieceType {
             PieceType::Huygen,
         ]
     }
+
+    /// Convert from u8
+    #[inline]
+    pub fn from_u8(v: u8) -> Self {
+        if v < NUM_PIECE_TYPES {
+            unsafe { std::mem::transmute(v) }
+        } else {
+            PieceType::Void
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct Piece {
-    pub piece_type: PieceType,
-    pub color: PlayerColor,
+// ============================================================================
+// Piece - Packed representation (1 byte)
+// ============================================================================
+
+/// Packed piece representation: encodes both piece type and color in a single byte.
+///
+/// Encoding: `packed = color * NUM_PIECE_TYPES + piece_type`
+/// - This matches the infinitechess.org JS encoding
+/// - Allows 3 colors × 22 types = 66 values (fits in 7 bits)
+///
+/// For compatibility, we provide `piece_type()` and `color()` accessor methods
+/// that decode the packed value.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct Piece(u8);
+
+impl std::fmt::Debug for Piece {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Piece")
+            .field("piece_type", &self.piece_type())
+            .field("color", &self.color())
+            .field("packed", &self.0)
+            .finish()
+    }
+}
+
+// Custom serde to preserve JSON compatibility with old format
+impl Serialize for Piece {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("Piece", 2)?;
+        s.serialize_field("piece_type", &self.piece_type())?;
+        s.serialize_field("color", &self.color())?;
+        s.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Piece {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct PieceFields {
+            piece_type: PieceType,
+            color: PlayerColor,
+        }
+        let fields = PieceFields::deserialize(deserializer)?;
+        Ok(Piece::new(fields.piece_type, fields.color))
+    }
 }
 
 impl Piece {
+    /// Create a new piece from type and color
+    #[inline]
     pub fn new(piece_type: PieceType, color: PlayerColor) -> Self {
-        Piece { piece_type, color }
+        Piece((color as u8) * NUM_PIECE_TYPES + (piece_type as u8))
+    }
+
+    /// Create a piece from a packed u8 value
+    #[inline]
+    pub fn from_packed(packed: u8) -> Self {
+        Piece(packed)
+    }
+
+    /// Get the raw packed value
+    #[inline]
+    pub fn packed(&self) -> u8 {
+        self.0
+    }
+
+    /// Decode the piece type
+    #[inline]
+    pub fn piece_type(&self) -> PieceType {
+        PieceType::from_u8(self.0 % NUM_PIECE_TYPES)
+    }
+
+    /// Decode the color
+    #[inline]
+    pub fn color(&self) -> PlayerColor {
+        PlayerColor::from_u8(self.0 / NUM_PIECE_TYPES)
     }
 }
+
+// ============================================================================
+// Board
+// ============================================================================
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(from = "BoardRaw", into = "BoardRaw")]
@@ -203,11 +330,14 @@ struct BoardRaw {
 
 impl From<BoardRaw> for Board {
     fn from(raw: BoardRaw) -> Self {
-        let has_neutral = raw.pieces.values().any(|p| p.piece_type.is_neutral_type());
+        let has_neutral = raw
+            .pieces
+            .values()
+            .any(|p| p.piece_type().is_neutral_type());
         let active_coords = if has_neutral {
             let mut set = HashSet::new();
             for (pos, piece) in &raw.pieces {
-                if !piece.piece_type.is_neutral_type() {
+                if !piece.piece_type().is_neutral_type() {
                     set.insert(*pos);
                 }
             }
@@ -243,10 +373,10 @@ impl Board {
         let pos = (x, y);
 
         // If we find a neutral piece and we aren't already tracking active coords, start tracking
-        if piece.piece_type.is_neutral_type() && self.active_coords.is_none() {
+        if piece.piece_type().is_neutral_type() && self.active_coords.is_none() {
             let mut set = HashSet::new();
             for (p_pos, p) in &self.pieces {
-                if !p.piece_type.is_neutral_type() {
+                if !p.piece_type().is_neutral_type() {
                     set.insert(*p_pos);
                 }
             }
@@ -256,7 +386,7 @@ impl Board {
         self.pieces.insert(pos, piece);
 
         if let Some(ref mut active) = self.active_coords {
-            if !piece.piece_type.is_neutral_type() {
+            if !piece.piece_type().is_neutral_type() {
                 active.insert(pos);
             } else {
                 active.remove(&pos);
@@ -272,11 +402,68 @@ impl Board {
         let p = self.pieces.remove(&(*x, *y));
         if let Some(ref piece) = p {
             if let Some(ref mut active) = self.active_coords {
-                if !piece.piece_type.is_neutral_type() {
+                if !piece.piece_type().is_neutral_type() {
                     active.remove(&(*x, *y));
                 }
             }
         }
         p
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_piece_packing() {
+        // Test all combinations of color and type
+        for color in [PlayerColor::Neutral, PlayerColor::White, PlayerColor::Black] {
+            for pt in [
+                PieceType::Void,
+                PieceType::Obstacle,
+                PieceType::King,
+                PieceType::Queen,
+                PieceType::Rook,
+                PieceType::Bishop,
+                PieceType::Knight,
+                PieceType::Pawn,
+            ] {
+                let piece = Piece::new(pt, color);
+                assert_eq!(
+                    piece.piece_type(),
+                    pt,
+                    "piece_type mismatch for {:?}/{:?}",
+                    pt,
+                    color
+                );
+                assert_eq!(
+                    piece.color(),
+                    color,
+                    "color mismatch for {:?}/{:?}",
+                    pt,
+                    color
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_piece_size() {
+        assert_eq!(std::mem::size_of::<Piece>(), 1, "Piece should be 1 byte");
+    }
+
+    #[test]
+    fn test_piece_packed_values() {
+        // Test that packed values match JS encoding: color * NUM_TYPES + type
+        let white_pawn = Piece::new(PieceType::Pawn, PlayerColor::White);
+        assert_eq!(white_pawn.packed(), 1 * 22 + 21); // White=1, Pawn=21
+
+        let black_king = Piece::new(PieceType::King, PlayerColor::Black);
+        assert_eq!(black_king.packed(), 2 * 22 + 2); // Black=2, King=2
     }
 }

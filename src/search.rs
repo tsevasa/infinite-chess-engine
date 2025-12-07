@@ -4,12 +4,14 @@ use crate::game::GameState;
 use crate::moves::{get_quiescence_captures, Move};
 use std::cell::RefCell;
 
-#[cfg(target_arch = "wasm32")]
+// For web WASM (browser), use js_sys::Date for timing
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 use js_sys::Date;
-#[cfg(not(target_arch = "wasm32"))]
+// For native builds and WASI, use std::time::Instant
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 use std::time::Instant;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 fn now_ms() -> f64 {
     // Simple wall-clock timer for wasm; keeps the hot path small and avoids
     // repeated window()/performance() lookups.
@@ -50,19 +52,19 @@ pub use zobrist::{en_passant_key, piece_key, special_right_key, SIDE_KEY};
 /// Timer abstraction to handle platform differences
 #[derive(Clone)]
 pub struct Timer {
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
     start: f64,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
     start: Instant,
 }
 
 impl Timer {
     pub fn new() -> Self {
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
         {
             Self { start: now_ms() }
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
         {
             Self {
                 start: Instant::now(),
@@ -71,22 +73,22 @@ impl Timer {
     }
 
     pub fn reset(&mut self) {
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
         {
             self.start = now_ms();
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
         {
             self.start = Instant::now();
         }
     }
 
     pub fn elapsed_ms(&self) -> u128 {
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
         {
             (now_ms() - self.start) as u128
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
         {
             self.start.elapsed().as_millis()
         }
@@ -95,64 +97,61 @@ impl Timer {
 
 /// Lightweight statistics about the transposition table after a search.
 pub struct SearchStats {
-	pub tt_capacity: usize,
-	pub tt_used: usize,
-	pub tt_fill_permille: u32,
+    pub tt_capacity: usize,
+    pub tt_used: usize,
+    pub tt_fill_permille: u32,
 }
 
 thread_local! {
-	static GLOBAL_SEARCHER: RefCell<Option<Searcher>> = RefCell::new(None);
+    static GLOBAL_SEARCHER: RefCell<Option<Searcher>> = RefCell::new(None);
 }
 
-fn with_global_searcher<F, R>(
-	time_limit_ms: u128,
-	silent: bool,
-	f: F,
-) -> R
+#[allow(dead_code)]
+fn with_global_searcher<F, R>(time_limit_ms: u128, silent: bool, f: F) -> R
 where
-	F: FnOnce(&mut Searcher) -> R,
+    F: FnOnce(&mut Searcher) -> R,
 {
-	// Disable persistent searcher: create a fresh one per call so TT does not persist across searches.
-	let mut searcher = Searcher::new(time_limit_ms);
-	searcher.time_limit_ms = time_limit_ms;
-	searcher.silent = silent;
-	searcher.stopped = false;
-	searcher.timer.reset();
+    // Disable persistent searcher: create a fresh one per call so TT does not persist across searches.
+    let mut searcher = Searcher::new(time_limit_ms);
+    searcher.time_limit_ms = time_limit_ms;
+    searcher.silent = silent;
+    searcher.stopped = false;
+    searcher.timer.reset();
 
-	f(&mut searcher)
+    f(&mut searcher)
 }
 
 fn build_search_stats(searcher: &Searcher) -> SearchStats {
-	SearchStats {
-		tt_capacity: searcher.tt.capacity(),
-		tt_used: searcher.tt.used_entries(),
-		tt_fill_permille: searcher.tt.fill_permille(),
-	}
+    SearchStats {
+        tt_capacity: searcher.tt.capacity(),
+        tt_used: searcher.tt.used_entries(),
+        tt_fill_permille: searcher.tt.fill_permille(),
+    }
 }
 
 /// Return current TT statistics from the persistent global searcher, if any.
 /// When no global searcher exists yet, this returns zeros.
 pub fn get_current_tt_stats() -> SearchStats {
-	GLOBAL_SEARCHER.with(|cell| {
-		let opt = cell.borrow();
-		if let Some(ref searcher) = *opt {
-			build_search_stats(searcher)
-		} else {
-			SearchStats {
-				tt_capacity: 0,
-				tt_used: 0,
-				tt_fill_permille: 0,
-			}
-		}
-	})
+    GLOBAL_SEARCHER.with(|cell| {
+        let opt = cell.borrow();
+        if let Some(ref searcher) = *opt {
+            build_search_stats(searcher)
+        } else {
+            SearchStats {
+                tt_capacity: 0,
+                tt_used: 0,
+                tt_fill_permille: 0,
+            }
+        }
+    })
 }
 
 /// Reset the global search state, including the transposition table and heuristics.
 /// Call this when starting a brand new game so old entries don't carry over.
 pub fn reset_search_state() {
-	GLOBAL_SEARCHER.with(|cell| {
-		*cell.borrow_mut() = None;
-	});
+    GLOBAL_SEARCHER.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
 }
 
 /// Search state that persists across the search
@@ -314,9 +313,9 @@ impl Searcher {
 
         // Check time only every N nodes to keep the hot path cheap, especially
         // on wasm where elapsed_ms() crosses the JS boundary.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
         const TIME_CHECK_MASK: u64 = 8191; // every 8192 nodes
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
         const TIME_CHECK_MASK: u64 = 2047; // every 2048 nodes
 
         if self.nodes & TIME_CHECK_MASK == 0 {
@@ -366,7 +365,7 @@ impl Searcher {
 
         let pv = self.format_pv();
 
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
         {
             use crate::log;
             log(&format!(
@@ -382,7 +381,7 @@ impl Searcher {
                 pv
             ));
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
         {
             eprintln!(
                 "info depth {} seldepth {} score {} nodes {} qnodes {} nps {} time {} hashfull {} pv {}",
@@ -868,9 +867,9 @@ fn negamax(
         if allow_null && depth >= nmp_min_depth() && static_eval >= beta {
             // Check if we have non-pawn material (avoid zugzwang)
             let has_pieces = game.board.pieces.iter().any(|(_, p)| {
-                p.color == game.turn
-                    && p.piece_type != PieceType::Pawn
-                    && p.piece_type != PieceType::King
+                p.color() == game.turn
+                    && p.piece_type() != PieceType::Pawn
+                    && p.piece_type() != PieceType::King
             });
 
             if has_pieces {
@@ -927,8 +926,8 @@ fn negamax(
 
     for m in &moves {
         let captured_piece = game.board.get_piece(&m.to.x, &m.to.y);
-        let is_capture = captured_piece.map_or(false, |p| !p.piece_type.is_neutral_type());
-        let captured_type = captured_piece.map(|p| p.piece_type);
+        let is_capture = captured_piece.map_or(false, |p| !p.piece_type().is_neutral_type());
+        let captured_type = captured_piece.map(|p| p.piece_type());
         let is_promotion = m.promotion.is_some();
 
         // Futility pruning - skip quiet moves that can't raise alpha
@@ -971,22 +970,14 @@ fn negamax(
         let move_history_backup = searcher.move_history[ply].take();
         let piece_history_backup = searcher.moved_piece_history[ply];
         searcher.move_history[ply] = Some(m.clone());
-        searcher.moved_piece_history[ply] = m.piece.piece_type as u8;
+        searcher.moved_piece_history[ply] = m.piece.piece_type() as u8;
 
         legal_moves += 1;
 
         let score;
         if legal_moves == 1 {
             // Full window search for first legal move
-            score = -negamax(
-                searcher,
-                game,
-                depth - 1,
-                ply + 1,
-                -beta,
-                -alpha,
-                true,
-            );
+            score = -negamax(searcher, game, depth - 1, ply + 1, -beta, -alpha, true);
         } else {
             // Late Move Reductions
             let mut reduction = 0;
@@ -1021,7 +1012,7 @@ fn negamax(
                 && best_score > -MATE_SCORE
             {
                 let idx = hash_move_dest(m);
-                let value = searcher.history[m.piece.piece_type as usize][idx];
+                let value = searcher.history[m.piece.piece_type() as usize][idx];
 
                 if value < hlp_history_reduce() {
                     // Extra reduction based on poor history
@@ -1100,14 +1091,14 @@ fn negamax(
                 let adj = bonus.min(history_bonus_cap());
                 let max_history: i32 = params::DEFAULT_HISTORY_MAX_GRAVITY;
 
-                searcher.update_history(m.piece.piece_type, idx, bonus);
+                searcher.update_history(m.piece.piece_type(), idx, bonus);
 
                 for quiet in &quiets_searched {
                     let qidx = hash_move_dest(quiet);
-                    if quiet.piece.piece_type == m.piece.piece_type && qidx == idx {
+                    if quiet.piece.piece_type() == m.piece.piece_type() && qidx == idx {
                         continue;
                     }
-                    searcher.update_history(quiet.piece.piece_type, qidx, -bonus);
+                    searcher.update_history(quiet.piece.piece_type(), qidx, -bonus);
                 }
 
                 // Killer move heuristic (for non-captures)
@@ -1120,7 +1111,7 @@ fn negamax(
                     let (prev_from_hash, prev_to_hash) = searcher.prev_move_stack[ply - 1];
                     if prev_from_hash < 256 && prev_to_hash < 256 {
                         searcher.countermoves[prev_from_hash][prev_to_hash] =
-                            (m.piece.piece_type as u8, m.to.x as i16, m.to.y as i16);
+                            (m.piece.piece_type() as u8, m.to.x as i16, m.to.y as i16);
                     }
                 }
 
@@ -1155,7 +1146,7 @@ fn negamax(
             } else if let Some(cap_type) = captured_type {
                 // Update capture history on beta cutoff
                 let bonus = (depth * depth) as i32;
-                searcher.capture_history[m.piece.piece_type as usize][cap_type as usize] += bonus;
+                searcher.capture_history[m.piece.piece_type() as usize][cap_type as usize] += bonus;
             }
             break;
         }

@@ -43,7 +43,7 @@ fn generate_knightrider_moves(board: &Board, from: &Coordinate, piece: &Piece) -
     // Pre-collect piece data once
     let mut pieces_data: Vec<(i64, i64, bool)> = Vec::with_capacity(piece_count);
     for ((px, py), p) in &board.pieces {
-        let is_enemy = is_enemy_piece(p, piece.color);
+        let is_enemy = is_enemy_piece(p, piece.color());
         pieces_data.push((*px, *py, is_enemy));
     }
 
@@ -107,7 +107,7 @@ fn generate_knightrider_moves(board: &Board, from: &Coordinate, piece: &Piece) -
 
             if let Some(blocker) = board.get_piece(&x, &y) {
                 // Enemy: can capture on this square.
-                if blocker.color != piece.color && blocker.piece_type != PieceType::Void {
+                if blocker.color() != piece.color() && blocker.piece_type() != PieceType::Void {
                     moves.push(Move::new(*from, Coordinate::new(x, y), *piece));
                 }
                 // Either way, ray stops at first blocker.
@@ -268,7 +268,7 @@ impl Move {
 
 #[inline]
 fn is_enemy_piece(piece: &Piece, our_color: PlayerColor) -> bool {
-    piece.color != our_color && piece.piece_type != PieceType::Void
+    piece.color() != our_color && piece.piece_type() != PieceType::Void
 }
 
 pub fn get_legal_moves_into(
@@ -290,7 +290,7 @@ pub fn get_legal_moves_into(
             };
 
             // Skip neutral pieces (already covered by active_coords) and non-turn pieces
-            if piece.color != turn {
+            if piece.color() != turn {
                 continue;
             }
 
@@ -308,7 +308,7 @@ pub fn get_legal_moves_into(
         }
     } else {
         for ((x, y), piece) in &board.pieces {
-            if piece.color != turn || piece.color == PlayerColor::Neutral {
+            if piece.color() != turn || piece.color() == PlayerColor::Neutral {
                 continue;
             }
             let from = Coordinate::new(*x, *y);
@@ -367,7 +367,7 @@ pub fn get_quiescence_captures(
                 None => continue,
             };
 
-            if piece.color != turn {
+            if piece.color() != turn {
                 continue;
             }
 
@@ -385,7 +385,7 @@ pub fn get_quiescence_captures(
         }
     } else {
         for ((x, y), piece) in &board.pieces {
-            if piece.color != turn || piece.color == PlayerColor::Neutral {
+            if piece.color() != turn || piece.color() == PlayerColor::Neutral {
                 continue;
             }
             let from = Coordinate::new(*x, *y);
@@ -414,7 +414,7 @@ fn generate_captures_for_piece(
     indices: &SpatialIndices,
     out: &mut Vec<Move>,
 ) {
-    match piece.piece_type {
+    match piece.piece_type() {
         PieceType::Void | PieceType::Obstacle => {}
 
         // Pawns: only capture and en-passant moves (with promotions when applicable)
@@ -433,34 +433,34 @@ fn generate_captures_for_piece(
         // Knight-like leapers
         PieceType::Knight => {
             let m = generate_leaper_moves(board, from, piece, 1, 2);
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
         PieceType::Camel => {
             let m = generate_leaper_moves(board, from, piece, 1, 3);
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
         PieceType::Giraffe => {
             let m = generate_leaper_moves(board, from, piece, 1, 4);
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
         PieceType::Zebra => {
             let m = generate_leaper_moves(board, from, piece, 2, 3);
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
 
         // King/Guard/Centaur/RoyalCentaur/Hawk: use compass moves, then filter captures
         PieceType::King | PieceType::Guard => {
             let m = generate_compass_moves(board, from, piece, 1);
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
         PieceType::Centaur | PieceType::RoyalCentaur => {
             let m = generate_compass_moves(board, from, piece, 1);
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
         PieceType::Hawk => {
             let mut m = generate_compass_moves(board, from, piece, 2);
             m.extend(generate_compass_moves(board, from, piece, 3));
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
 
         // Standard sliders and slider-leaper compounds
@@ -513,7 +513,7 @@ fn generate_captures_for_piece(
                 out,
             );
             let m = generate_leaper_moves(board, from, piece, 1, 2);
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
         PieceType::Archbishop => {
             // Bishop + knight
@@ -526,7 +526,7 @@ fn generate_captures_for_piece(
                 out,
             );
             let m = generate_leaper_moves(board, from, piece, 1, 2);
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
         PieceType::Amazon => {
             // Queen + knight
@@ -547,25 +547,25 @@ fn generate_captures_for_piece(
                 out,
             );
             let m = generate_leaper_moves(board, from, piece, 1, 2);
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
 
         // Knightrider: sliding along knight vectors
         PieceType::Knightrider => {
             let m = generate_knightrider_moves(board, from, piece);
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
 
         // Huygen: use existing generator and keep only captures
         PieceType::Huygen => {
             let m = generate_huygen_moves(board, from, piece, Some(indices));
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
 
         // Rose: use existing generator and keep only captures
         PieceType::Rose => {
             let m = generate_rose_moves(board, from, piece);
-            extend_captures_only(board, piece.color, m, out);
+            extend_captures_only(board, piece.color(), m, out);
         }
     }
 }
@@ -579,7 +579,7 @@ pub fn get_pseudo_legal_moves_for_piece(
     indices: Option<&SpatialIndices>,
     game_rules: &GameRules,
 ) -> Vec<Move> {
-    match piece.piece_type {
+    match piece.piece_type() {
         // Neutral/blocking pieces cannot move
         PieceType::Void | PieceType::Obstacle => Vec::new(),
         PieceType::Pawn => {
@@ -800,7 +800,7 @@ pub fn is_square_attacked(
             let x = target.x + dx;
             let y = target.y + dy;
             if let Some(piece) = board.get_piece(&x, &y) {
-                if piece.color == attacker_color && types.contains(&piece.piece_type) {
+                if piece.color() == attacker_color && types.contains(&piece.piece_type()) {
                     return true;
                 }
             }
@@ -818,7 +818,7 @@ pub fn is_square_attacked(
     for pawn_dx in [-1, 1] {
         let pawn_x = target.x + pawn_dx;
         if let Some(piece) = board.get_piece(&pawn_x, &pawn_y) {
-            if piece.color == attacker_color && piece.piece_type == PieceType::Pawn {
+            if piece.color() == attacker_color && piece.piece_type() == PieceType::Pawn {
                 return true;
             }
         }
@@ -924,7 +924,7 @@ pub fn is_square_attacked(
             }
 
             if let Some(piece) = closest_piece {
-                if piece.color == attacker_color && valid_types.contains(&piece.piece_type) {
+                if piece.color() == attacker_color && valid_types.contains(&piece.piece_type()) {
                     return true;
                 }
             }
@@ -960,7 +960,7 @@ pub fn is_square_attacked(
             let x = target.x + dx * k;
             let y = target.y + dy * k;
             if let Some(piece) = board.get_piece(&x, &y) {
-                if piece.color == attacker_color && piece.piece_type == PieceType::Knightrider {
+                if piece.color() == attacker_color && piece.piece_type() == PieceType::Knightrider {
                     return true;
                 }
                 break; // Blocked
@@ -1015,8 +1015,8 @@ pub fn is_square_attacked(
                                 (*val, target.y)
                             };
                             if let Some(piece) = board.get_piece(&tx, &ty) {
-                                if piece.color == attacker_color
-                                    && piece.piece_type == PieceType::Huygen
+                                if piece.color() == attacker_color
+                                    && piece.piece_type() == PieceType::Huygen
                                 {
                                     return true;
                                 }
@@ -1044,7 +1044,7 @@ pub fn is_square_attacked(
         generate_rose_moves(board, target, &Piece::new(PieceType::Rose, attacker_color)); // Dummy piece
     for m in rose_moves {
         if let Some(piece) = board.get_piece(&m.to.x, &m.to.y) {
-            if piece.color == attacker_color && piece.piece_type == PieceType::Rose {
+            if piece.color() == attacker_color && piece.piece_type() == PieceType::Rose {
                 return true;
             }
         }
@@ -1062,7 +1062,7 @@ fn generate_pawn_moves(
     game_rules: &GameRules,
 ) -> Vec<Move> {
     let mut moves = Vec::new();
-    let direction = match piece.color {
+    let direction = match piece.color() {
         PlayerColor::White => 1,
         PlayerColor::Black => -1,
         PlayerColor::Neutral => return moves, // Neutral pawns can't move
@@ -1070,14 +1070,14 @@ fn generate_pawn_moves(
 
     // Get promotion ranks for this color (default to 8 for white, 1 for black if not specified)
     let promotion_ranks: Vec<i64> = if let Some(ref ranks) = game_rules.promotion_ranks {
-        match piece.color {
+        match piece.color() {
             PlayerColor::White => ranks.white.clone(),
             PlayerColor::Black => ranks.black.clone(),
             PlayerColor::Neutral => vec![],
         }
     } else {
         // Default promotion ranks for standard chess
-        match piece.color {
+        match piece.color() {
             PlayerColor::White => vec![8],
             PlayerColor::Black => vec![1],
             PlayerColor::Neutral => vec![],
@@ -1157,7 +1157,7 @@ fn generate_pawn_moves(
         if let Some(target) = board.get_piece(&capture_x, &capture_y) {
             // Can capture any piece that's not the same color as us
             // This includes neutral pieces (obstacles can be captured)
-            if is_enemy_piece(target, piece.color) {
+            if is_enemy_piece(target, piece.color()) {
                 add_pawn_move_inner(
                     &mut moves,
                     *from,
@@ -1195,7 +1195,7 @@ fn generate_pawn_capture_moves(
     game_rules: &GameRules,
     out: &mut Vec<Move>,
 ) {
-    let direction = match piece.color {
+    let direction = match piece.color() {
         PlayerColor::White => 1,
         PlayerColor::Black => -1,
         PlayerColor::Neutral => return, // Neutral pawns can't move
@@ -1203,13 +1203,13 @@ fn generate_pawn_capture_moves(
 
     // Get promotion ranks for this color (default to 8 for white, 1 for black if not specified)
     let promotion_ranks: Vec<i64> = if let Some(ref ranks) = game_rules.promotion_ranks {
-        match piece.color {
+        match piece.color() {
             PlayerColor::White => ranks.white.clone(),
             PlayerColor::Black => ranks.black.clone(),
             PlayerColor::Neutral => vec![],
         }
     } else {
-        match piece.color {
+        match piece.color() {
             PlayerColor::White => vec![8],
             PlayerColor::Black => vec![1],
             PlayerColor::Neutral => vec![],
@@ -1256,12 +1256,12 @@ fn generate_pawn_capture_moves(
         let capture_y = from.y + direction;
 
         if let Some(target) = board.get_piece(&capture_x, &capture_y) {
-            if is_enemy_piece(target, piece.color) {
+            if is_enemy_piece(target, piece.color()) {
                 // Obstocean Optimization:
                 // If it's a neutral piece (Obstacle), capturing it is a "quiet" move in material terms (0 -> 0).
                 // Doing this for all obstacles causes a QS explosion.
                 // We ONLY allow capturing obstacles in QS if it results in PROMOTION (Tactical win).
-                let is_neutral = target.piece_type.is_neutral_type();
+                let is_neutral = target.piece_type().is_neutral_type();
                 if !is_neutral || promotion_ranks.contains(&capture_y) {
                     add_pawn_cap_move(
                         out,
@@ -1305,9 +1305,9 @@ fn generate_castling_moves(
     for coord in special_rights.iter() {
         if let Some(target_piece) = board.get_piece(&coord.x, &coord.y) {
             // Must be same color and a valid castling partner (rook-like piece, not pawn)
-            if target_piece.color == piece.color
-                && target_piece.piece_type != PieceType::Pawn
-                && !target_piece.piece_type.is_royal()
+            if target_piece.color() == piece.color()
+                && target_piece.piece_type() != PieceType::Pawn
+                && !target_piece.piece_type().is_royal()
             {
                 let dx = coord.x - from.x;
                 let dy = coord.y - from.y;
@@ -1326,7 +1326,7 @@ fn generate_castling_moves(
                     }
 
                     if clear {
-                        let opponent = piece.color.opponent();
+                        let opponent = piece.color().opponent();
 
                         let path_1 = from.x + dir;
                         let path_2 = from.x + (dir * 2);
@@ -1385,7 +1385,9 @@ fn generate_sliding_capture_moves(
 
                 if let Some(target) = board.get_piece(&x, &y) {
                     // For sliders in QS, we do NOT want to capture obstacles (quiet positional moves).
-                    if is_enemy_piece(target, piece.color) && !target.piece_type.is_neutral_type() {
+                    if is_enemy_piece(target, piece.color())
+                        && !target.piece_type().is_neutral_type()
+                    {
                         out.push(Move::new(*from, Coordinate::new(x, y), *piece));
                     }
                     break; // Any piece blocks further along this ray
@@ -1409,7 +1411,7 @@ fn extend_captures_only(
 ) {
     for m in moves_in {
         if let Some(target) = board.get_piece(&m.to.x, &m.to.y) {
-            if is_enemy_piece(target, our_color) && !target.piece_type.is_neutral_type() {
+            if is_enemy_piece(target, our_color) && !target.piece_type().is_neutral_type() {
                 out.push(m);
             }
         }
@@ -1445,7 +1447,7 @@ fn generate_compass_moves(
         }
 
         if let Some(target) = board.get_piece(&to_x, &to_y) {
-            if is_enemy_piece(target, piece.color) {
+            if is_enemy_piece(target, piece.color()) {
                 moves.push(Move::new(
                     from.clone(),
                     Coordinate::new(to_x, to_y),
@@ -1494,7 +1496,7 @@ fn generate_leaper_moves(
         }
 
         if let Some(target) = board.get_piece(&to_x, &to_y) {
-            if is_enemy_piece(target, piece.color) {
+            if is_enemy_piece(target, piece.color()) {
                 moves.push(Move::new(
                     from.clone(),
                     Coordinate::new(to_x, to_y),
@@ -1595,7 +1597,7 @@ fn generate_sliding_moves(
     // Pre-collect piece data in a single pass - much faster than HashSets
     let mut pieces_data: Vec<(i64, i64, bool)> = Vec::with_capacity(piece_count);
     for ((px, py), p) in &board.pieces {
-        let is_enemy = is_enemy_piece(p, piece.color);
+        let is_enemy = is_enemy_piece(p, piece.color());
         pieces_data.push((*px, *py, is_enemy));
     }
 
@@ -1829,7 +1831,7 @@ fn generate_huygen_moves(
         let mut cols = HashSet::new();
         let mut rows = HashSet::new();
         for ((x, y), p) in &board.pieces {
-            if p.piece_type == PieceType::Void || p.piece_type == PieceType::Obstacle {
+            if p.piece_type() == PieceType::Void || p.piece_type() == PieceType::Obstacle {
                 continue;
             }
             cols.insert(*x);
@@ -1872,10 +1874,10 @@ fn generate_huygen_moves(
                                     if let Some(p) = board.get_piece(&tx, &ty) {
                                         // Treat Void as friendly for capture purposes
                                         closest_piece_color =
-                                            Some(if p.piece_type == PieceType::Void {
-                                                piece.color
+                                            Some(if p.piece_type() == PieceType::Void {
+                                                piece.color()
                                             } else {
-                                                p.color
+                                                p.color()
                                             });
                                     }
                                     break;
@@ -1895,10 +1897,10 @@ fn generate_huygen_moves(
                                     if let Some(p) = board.get_piece(&tx, &ty) {
                                         // Treat Void as friendly for capture purposes
                                         closest_piece_color =
-                                            Some(if p.piece_type == PieceType::Void {
-                                                piece.color
+                                            Some(if p.piece_type() == PieceType::Void {
+                                                piece.color()
                                             } else {
-                                                p.color
+                                                p.color()
                                             });
                                     }
                                     break;
@@ -1935,10 +1937,10 @@ fn generate_huygen_moves(
                                     closest_prime_dist = Some(dist);
                                     // Treat Void as friendly for capture purposes
                                     closest_piece_color =
-                                        Some(if target_piece.piece_type == PieceType::Void {
-                                            piece.color
+                                        Some(if target_piece.piece_type() == PieceType::Void {
+                                            piece.color()
                                         } else {
-                                            target_piece.color
+                                            target_piece.color()
                                         });
                                 }
                             }
@@ -1958,7 +1960,7 @@ fn generate_huygen_moves(
                         let to_y = from.y + (dir_y * s);
 
                         if s == limit {
-                            if closest_piece_color != Some(piece.color) {
+                            if closest_piece_color != Some(piece.color()) {
                                 moves.push(Move::new(
                                     from.clone(),
                                     Coordinate::new(to_x, to_y),
@@ -2049,7 +2051,7 @@ fn generate_rose_moves(board: &Board, from: &Coordinate, piece: &Piece) -> Vec<M
                 current_y += dy;
 
                 if let Some(target) = board.get_piece(&current_x, &current_y) {
-                    if is_enemy_piece(target, piece.color) {
+                    if is_enemy_piece(target, piece.color()) {
                         moves.push(Move::new(
                             from.clone(),
                             Coordinate::new(current_x, current_y),

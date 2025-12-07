@@ -37,8 +37,8 @@ pub fn sort_moves(
 
         if let Some(target) = game.board.get_piece(&m.to.x, &m.to.y) {
             // Capture: MVV-LVA + SEE threshold + capture history.
-            let victim_val = get_piece_value(target.piece_type);
-            let attacker_val = get_piece_value(m.piece.piece_type);
+            let victim_val = get_piece_value(target.piece_type());
+            let attacker_val = get_piece_value(m.piece.piece_type());
             let mvv_lva = victim_val * 10 - attacker_val;
 
             // Approximate Zig's see_threshold(pos, move, -90): treat captures
@@ -54,7 +54,7 @@ pub fn sort_moves(
             }
 
             let cap_hist =
-                searcher.capture_history[m.piece.piece_type as usize][target.piece_type as usize];
+                searcher.capture_history[m.piece.piece_type() as usize][target.piece_type() as usize];
             score += cap_hist / 10;
         } else {
             // Quiet move: killers + countermove + history + continuation history
@@ -72,7 +72,7 @@ pub fn sort_moves(
                     let (cm_piece, cm_to_x, cm_to_y) =
                         searcher.countermoves[prev_from_hash][prev_to_hash];
                     if cm_piece != 0
-                        && cm_piece == m.piece.piece_type as u8
+                        && cm_piece == m.piece.piece_type() as u8
                         && cm_to_x == m.to.x as i16
                         && cm_to_y == m.to.y as i16
                     {
@@ -83,7 +83,7 @@ pub fn sort_moves(
 
                 // Main history heuristic
                 let idx = hash_move_dest(m);
-                score += searcher.history[m.piece.piece_type as usize][idx];
+                score += searcher.history[m.piece.piece_type() as usize][idx];
 
                 // Continuation history: [prev_piece][prev_to][cur_from][cur_to]
                 // Use 1-ply, 2-ply, and 4-ply back (like Zig: plies_ago = 0, 1, 3)
@@ -125,7 +125,7 @@ pub fn sort_captures(game: &GameState, moves: &mut Vec<Move>) {
         let mut score = 0;
         if let Some(target) = game.board.get_piece(&m.to.x, &m.to.y) {
             // MVV-LVA: prioritize capturing high value pieces with low value attackers
-            score -= get_piece_value(target.piece_type) * 10 - get_piece_value(m.piece.piece_type);
+            score -= get_piece_value(target.piece_type()) * 10 - get_piece_value(m.piece.piece_type());
         }
         score
     });

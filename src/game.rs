@@ -118,9 +118,9 @@ impl GameState {
         for coord in &self.special_rights {
             if let Some(piece) = self.board.get_piece(&coord.x, &coord.y) {
                 // Only include kings and rooks (not pawns) in castling rights
-                if piece.piece_type == PieceType::King
-                    || piece.piece_type == PieceType::Rook
-                    || piece.piece_type == PieceType::RoyalCentaur
+                if piece.piece_type() == PieceType::King
+                    || piece.piece_type() == PieceType::Rook
+                    || piece.piece_type() == PieceType::RoyalCentaur
                 {
                     rights.insert(coord.clone());
                 }
@@ -203,7 +203,7 @@ impl GameState {
                     Some(p) => p,
                     None => continue,
                 };
-                match piece.color {
+                match piece.color() {
                     PlayerColor::White => {
                         white = white.saturating_add(1);
                         self.white_pieces.push((*x, *y));
@@ -217,7 +217,7 @@ impl GameState {
             }
         } else {
             for ((x, y), piece) in &self.board.pieces {
-                match piece.color {
+                match piece.color() {
                     PlayerColor::White => {
                         white = white.saturating_add(1);
                         self.white_pieces.push((*x, *y));
@@ -243,7 +243,7 @@ impl GameState {
     pub fn init_starting_squares(&mut self) {
         self.starting_squares.clear();
         for ((x, y), piece) in &self.board.pieces {
-            if piece.piece_type != PieceType::Pawn && !piece.piece_type.is_royal() {
+            if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
                 self.starting_squares.insert(Coordinate::new(*x, *y));
             }
         }
@@ -310,20 +310,20 @@ impl GameState {
                     Some(p) => p,
                     None => continue,
                 };
-                if piece.piece_type != PieceType::King {
-                    if piece.color == PlayerColor::White {
+                if piece.piece_type() != PieceType::King {
+                    if piece.color() == PlayerColor::White {
                         white_has_non_king = true;
-                    } else if piece.color == PlayerColor::Black {
+                    } else if piece.color() == PlayerColor::Black {
                         black_has_non_king = true;
                     }
                 }
             }
         } else {
             for (_, piece) in &self.board.pieces {
-                if piece.piece_type != PieceType::King {
-                    if piece.color == PlayerColor::White {
+                if piece.piece_type() != PieceType::King {
+                    if piece.color() == PlayerColor::White {
                         white_has_non_king = true;
-                    } else if piece.color == PlayerColor::Black {
+                    } else if piece.color() == PlayerColor::Black {
                         black_has_non_king = true;
                     }
                 }
@@ -400,14 +400,14 @@ impl GameState {
                     Some(p) => p,
                     None => continue,
                 };
-                h ^= piece_key(piece.piece_type, piece.color, *x, *y);
+                h ^= piece_key(piece.piece_type(), piece.color(), *x, *y);
             }
         } else {
             for ((x, y), piece) in &self.board.pieces {
-                if piece.color == PlayerColor::Neutral {
+                if piece.color() == PlayerColor::Neutral {
                     continue;
                 }
-                h ^= piece_key(piece.piece_type, piece.color, *x, *y);
+                h ^= piece_key(piece.piece_type(), piece.color(), *x, *y);
             }
         }
 
@@ -467,10 +467,10 @@ impl GameState {
                     Some(p) => p,
                     None => continue,
                 };
-                if piece.color == PlayerColor::Neutral {
+                if piece.color() == PlayerColor::Neutral {
                     continue;
                 }
-                match piece.piece_type {
+                match piece.piece_type() {
                     PieceType::King
                     | PieceType::Queen
                     | PieceType::Rook
@@ -487,10 +487,10 @@ impl GameState {
             }
         } else {
             for (_, piece) in &self.board.pieces {
-                if piece.color == PlayerColor::Neutral {
+                if piece.color() == PlayerColor::Neutral {
                     continue;
                 }
-                match piece.piece_type {
+                match piece.piece_type() {
                     PieceType::King
                     | PieceType::Queen
                     | PieceType::Rook
@@ -514,7 +514,7 @@ impl GameState {
                     Some(p) => p,
                     None => continue,
                 };
-                if piece.color == our_color && piece.piece_type.is_royal() {
+                if piece.color() == our_color && piece.piece_type().is_royal() {
                     if royal_pos.is_some() {
                         self.get_legal_moves_into(out);
                         return;
@@ -524,7 +524,7 @@ impl GameState {
             }
         } else {
             for ((x, y), piece) in &self.board.pieces {
-                if piece.color == our_color && piece.piece_type.is_royal() {
+                if piece.color() == our_color && piece.piece_type().is_royal() {
                     if royal_pos.is_some() {
                         self.get_legal_moves_into(out);
                         return;
@@ -554,7 +554,7 @@ impl GameState {
             for dx in [-1i64, 1] {
                 let px = king_sq.x + dx;
                 if let Some(p) = self.board.get_piece(&px, &pawn_y) {
-                    if p.color == their_color && p.piece_type == PieceType::Pawn {
+                    if p.color() == their_color && p.piece_type() == PieceType::Pawn {
                         checkers.push(Coordinate::new(px, pawn_y));
                     }
                 }
@@ -575,7 +575,7 @@ impl GameState {
             let x = king_sq.x + dx;
             let y = king_sq.y + dy;
             if let Some(p) = self.board.get_piece(&x, &y) {
-                if p.color == their_color && p.piece_type == PieceType::Knight {
+                if p.color() == their_color && p.piece_type() == PieceType::Knight {
                     checkers.push(Coordinate::new(x, y));
                 }
             }
@@ -595,7 +595,7 @@ impl GameState {
             let x = king_sq.x + dx;
             let y = king_sq.y + dy;
             if let Some(p) = self.board.get_piece(&x, &y) {
-                if p.color == their_color && p.piece_type == PieceType::King {
+                if p.color() == their_color && p.piece_type() == PieceType::King {
                     checkers.push(Coordinate::new(x, y));
                 }
             }
@@ -609,8 +609,8 @@ impl GameState {
             let mut y = king_sq.y + dy;
             loop {
                 if let Some(p) = self.board.get_piece(&x, &y) {
-                    if p.color == their_color
-                        && (p.piece_type == PieceType::Rook || p.piece_type == PieceType::Queen)
+                    if p.color() == their_color
+                        && (p.piece_type() == PieceType::Rook || p.piece_type() == PieceType::Queen)
                     {
                         checkers.push(Coordinate::new(x, y));
                     }
@@ -629,8 +629,9 @@ impl GameState {
             let mut y = king_sq.y + dy;
             loop {
                 if let Some(p) = self.board.get_piece(&x, &y) {
-                    if p.color == their_color
-                        && (p.piece_type == PieceType::Bishop || p.piece_type == PieceType::Queen)
+                    if p.color() == their_color
+                        && (p.piece_type() == PieceType::Bishop
+                            || p.piece_type() == PieceType::Queen)
                     {
                         checkers.push(Coordinate::new(x, y));
                     }
@@ -696,7 +697,7 @@ impl GameState {
                     Some(p) => p,
                     None => continue,
                 };
-                if piece.color != our_color {
+                if piece.color() != our_color {
                     continue;
                 }
                 if *x == king_sq.x && *y == king_sq.y {
@@ -711,7 +712,7 @@ impl GameState {
                     let ddx = tx - from.x;
                     let ddy = ty - from.y;
 
-                    match piece.piece_type {
+                    match piece.piece_type() {
                         PieceType::Pawn => {
                             let dir = match our_color {
                                 PlayerColor::White => 1,
@@ -783,7 +784,7 @@ impl GameState {
             }
         } else {
             for ((x, y), piece) in &self.board.pieces {
-                if piece.color != our_color {
+                if piece.color() != our_color {
                     continue;
                 }
                 if *x == king_sq.x && *y == king_sq.y {
@@ -798,7 +799,7 @@ impl GameState {
                     let ddx = tx - from.x;
                     let ddy = ty - from.y;
 
-                    match piece.piece_type {
+                    match piece.piece_type() {
                         PieceType::Pawn => {
                             let dir = match our_color {
                                 PlayerColor::White => 1,
@@ -888,7 +889,7 @@ impl GameState {
                     Some(p) => p,
                     None => continue,
                 };
-                if piece.color == moved_color && piece.piece_type.is_royal() {
+                if piece.color() == moved_color && piece.piece_type().is_royal() {
                     let pos = Coordinate::new(*x, *y);
                     if is_square_attacked(&self.board, &pos, self.turn, Some(indices)) {
                         return true;
@@ -897,7 +898,7 @@ impl GameState {
             }
         } else {
             for ((x, y), piece) in &self.board.pieces {
-                if piece.color == moved_color && piece.piece_type.is_royal() {
+                if piece.color() == moved_color && piece.piece_type().is_royal() {
                     let pos = Coordinate::new(*x, *y);
                     if is_square_attacked(&self.board, &pos, self.turn, Some(indices)) {
                         return true;
@@ -920,7 +921,7 @@ impl GameState {
                     Some(p) => p,
                     None => continue,
                 };
-                if piece.color == self.turn && piece.piece_type.is_royal() {
+                if piece.color() == self.turn && piece.piece_type().is_royal() {
                     let pos = Coordinate::new(*x, *y);
                     if is_square_attacked(&self.board, &pos, attacker_color, Some(indices)) {
                         return true;
@@ -929,7 +930,7 @@ impl GameState {
             }
         } else {
             for ((x, y), piece) in &self.board.pieces {
-                if piece.color == self.turn && piece.piece_type.is_royal() {
+                if piece.color() == self.turn && piece.piece_type().is_royal() {
                     let pos = Coordinate::new(*x, *y);
                     if is_square_attacked(&self.board, &pos, attacker_color, Some(indices)) {
                         return true;
@@ -972,8 +973,8 @@ impl GameState {
         let is_capture = captured.is_some();
 
         if let Some(ref cap) = captured {
-            let value = get_piece_value(cap.piece_type);
-            if cap.color == PlayerColor::White {
+            let value = get_piece_value(cap.piece_type());
+            if cap.color() == PlayerColor::White {
                 self.material_score -= value;
                 self.white_piece_count = self.white_piece_count.saturating_sub(1);
             } else {
@@ -984,7 +985,7 @@ impl GameState {
 
         // Handle en passant capture
         let mut is_ep_capture = false;
-        if piece.piece_type == PieceType::Pawn {
+        if piece.piece_type() == PieceType::Pawn {
             if let Some(ep) = &self.en_passant {
                 if to_x == ep.square.x && to_y == ep.square.y {
                     if let Some(captured_pawn) = self
@@ -996,8 +997,8 @@ impl GameState {
                         self.spatial_indices
                             .remove(ep.pawn_square.x, ep.pawn_square.y);
 
-                        let value = get_piece_value(captured_pawn.piece_type);
-                        if captured_pawn.color == PlayerColor::White {
+                        let value = get_piece_value(captured_pawn.piece_type());
+                        if captured_pawn.color() == PlayerColor::White {
                             self.material_score -= value;
                             self.white_piece_count = self.white_piece_count.saturating_sub(1);
                         } else {
@@ -1012,7 +1013,7 @@ impl GameState {
         // Handle promotion material
         if let Some(promo_str) = promotion {
             let pawn_val = get_piece_value(PieceType::Pawn);
-            if piece.color == PlayerColor::White {
+            if piece.color() == PlayerColor::White {
                 self.material_score -= pawn_val;
             } else {
                 self.material_score += pawn_val;
@@ -1020,7 +1021,7 @@ impl GameState {
 
             let promo_type = PieceType::from_str(promo_str).unwrap_or(PieceType::Queen);
             let promo_val = get_piece_value(promo_type);
-            if piece.color == PlayerColor::White {
+            if piece.color() == PlayerColor::White {
                 self.material_score += promo_val;
             } else {
                 self.material_score -= promo_val;
@@ -1035,7 +1036,7 @@ impl GameState {
         }
 
         // Handle castling (king moves more than 1 square horizontally)
-        if piece.piece_type == PieceType::King || piece.piece_type == PieceType::RoyalCentaur {
+        if piece.piece_type() == PieceType::King || piece.piece_type() == PieceType::RoyalCentaur {
             let dx = to_x - from_x;
             if dx.abs() > 1 {
                 // Find the rook BEYOND the king's destination (rook is outside the path)
@@ -1044,7 +1045,7 @@ impl GameState {
                 let mut rook_x = to_x + rook_dir; // Start searching past king's destination
                 while rook_x >= -1_000_000 && rook_x <= 1_000_000 {
                     if let Some(r) = self.board.get_piece(&rook_x, &from_y) {
-                        if r.piece_type == PieceType::Rook && r.color == piece.color {
+                        if r.piece_type() == PieceType::Rook && r.color() == piece.color() {
                             // Found the rook - move it to the square the king jumped over
                             let rook = self.board.remove_piece(&rook_x, &from_y).unwrap();
                             let rook_to_x = to_x - rook_dir; // Rook goes on the other side of king
@@ -1062,7 +1063,7 @@ impl GameState {
         // Place the piece (with promotion if applicable)
         let final_piece = if let Some(promo_str) = promotion {
             if let Some(promo_type) = PieceType::from_str(promo_str) {
-                Piece::new(promo_type, piece.color)
+                Piece::new(promo_type, piece.color())
             } else {
                 piece.clone()
             }
@@ -1075,7 +1076,7 @@ impl GameState {
 
         // Update en passant state
         self.en_passant = None;
-        if piece.piece_type == PieceType::Pawn {
+        if piece.piece_type() == PieceType::Pawn {
             let dy = to_y - from_y;
             if dy.abs() == 2 {
                 let ep_y = from_y + (dy / 2);
@@ -1087,7 +1088,7 @@ impl GameState {
         }
 
         // Update clocks
-        if piece.piece_type == PieceType::Pawn || is_capture || is_ep_capture {
+        if piece.piece_type() == PieceType::Pawn || is_capture || is_ep_capture {
             self.halfmove_clock = 0;
         } else {
             self.halfmove_clock += 1;
@@ -1113,7 +1114,7 @@ impl GameState {
         self.spatial_indices.remove(m.from.x, m.from.y);
 
         // Hash: remove piece from source
-        self.hash ^= piece_key(piece.piece_type, piece.color, m.from.x, m.from.y);
+        self.hash ^= piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
 
         let mut undo_info = UndoMove {
             captured_piece: self.board.get_piece(&m.to.x, &m.to.y).copied(),
@@ -1136,12 +1137,12 @@ impl GameState {
 
         if let Some(captured) = &undo_info.captured_piece {
             // Hash: remove captured piece
-            self.hash ^= piece_key(captured.piece_type, captured.color, m.to.x, m.to.y);
+            self.hash ^= piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
             // Update spatial indices for captured piece on destination square
             self.spatial_indices.remove(m.to.x, m.to.y);
 
-            let value = get_piece_value(captured.piece_type);
-            if captured.color == PlayerColor::White {
+            let value = get_piece_value(captured.piece_type());
+            if captured.color() == PlayerColor::White {
                 self.material_score -= value;
                 self.white_piece_count = self.white_piece_count.saturating_sub(1);
             } else {
@@ -1152,7 +1153,7 @@ impl GameState {
 
         // Handle En Passant capture
         let mut is_ep_capture = false;
-        if piece.piece_type == PieceType::Pawn {
+        if piece.piece_type() == PieceType::Pawn {
             if let Some(ep) = &self.en_passant {
                 if m.to.x == ep.square.x && m.to.y == ep.square.y {
                     if let Some(captured_pawn) = self
@@ -1162,8 +1163,8 @@ impl GameState {
                         is_ep_capture = true;
                         // Hash: remove EP captured pawn
                         self.hash ^= piece_key(
-                            captured_pawn.piece_type,
-                            captured_pawn.color,
+                            captured_pawn.piece_type(),
+                            captured_pawn.color(),
                             ep.pawn_square.x,
                             ep.pawn_square.y,
                         );
@@ -1171,8 +1172,8 @@ impl GameState {
                         self.spatial_indices
                             .remove(ep.pawn_square.x, ep.pawn_square.y);
 
-                        let value = get_piece_value(captured_pawn.piece_type);
-                        if captured_pawn.color == PlayerColor::White {
+                        let value = get_piece_value(captured_pawn.piece_type());
+                        if captured_pawn.color() == PlayerColor::White {
                             self.material_score -= value;
                             self.white_piece_count = self.white_piece_count.saturating_sub(1);
                         } else {
@@ -1188,7 +1189,7 @@ impl GameState {
         if let Some(promo_type) = m.promotion {
             let pawn_val = get_piece_value(PieceType::Pawn);
             let promo_val = get_piece_value(promo_type);
-            if piece.color == PlayerColor::White {
+            if piece.color() == PlayerColor::White {
                 self.material_score -= pawn_val;
                 self.material_score += promo_val;
             } else {
@@ -1213,7 +1214,7 @@ impl GameState {
         }
 
         // Handle Castling Move (King moves > 1 square)
-        if piece.piece_type == PieceType::King {
+        if piece.piece_type() == PieceType::King {
             let dx = m.to.x - m.from.x;
             if dx.abs() > 1 {
                 if let Some(rook_coord) = &m.rook_coord {
@@ -1221,8 +1222,9 @@ impl GameState {
                         let rook_to_x = m.from.x + (if dx > 0 { 1 } else { -1 });
                         // Hash: remove rook from original, add at new position
                         self.hash ^=
-                            piece_key(rook.piece_type, rook.color, rook_coord.x, rook_coord.y);
-                        self.hash ^= piece_key(rook.piece_type, rook.color, rook_to_x, m.from.y);
+                            piece_key(rook.piece_type(), rook.color(), rook_coord.x, rook_coord.y);
+                        self.hash ^=
+                            piece_key(rook.piece_type(), rook.color(), rook_to_x, m.from.y);
                         self.board.set_piece(rook_to_x, m.from.y, rook);
                         // Update spatial indices for rook move
                         self.spatial_indices.remove(rook_coord.x, rook_coord.y);
@@ -1240,20 +1242,25 @@ impl GameState {
 
         // Move piece (handle promotion if needed)
         let final_piece = if let Some(promo_type) = m.promotion {
-            Piece::new(promo_type, piece.color)
+            Piece::new(promo_type, piece.color())
         } else {
             piece
         };
 
         // Hash: add piece at destination
-        self.hash ^= piece_key(final_piece.piece_type, final_piece.color, m.to.x, m.to.y);
+        self.hash ^= piece_key(
+            final_piece.piece_type(),
+            final_piece.color(),
+            m.to.x,
+            m.to.y,
+        );
         self.board.set_piece(m.to.x, m.to.y, final_piece);
         // Update spatial indices for moved piece on destination square
         self.spatial_indices.add(m.to.x, m.to.y);
 
         // Update En Passant state
         self.en_passant = None;
-        if piece.piece_type == PieceType::Pawn {
+        if piece.piece_type() == PieceType::Pawn {
             let dy = m.to.y - m.from.y;
             if dy.abs() == 2 {
                 let ep_y = m.from.y + (dy / 2);
@@ -1267,7 +1274,7 @@ impl GameState {
         }
 
         // Update clocks
-        if piece.piece_type == PieceType::Pawn || is_capture || is_ep_capture {
+        if piece.piece_type() == PieceType::Pawn || is_capture || is_ep_capture {
             self.halfmove_clock = 0;
         } else {
             self.halfmove_clock += 1;
@@ -1305,17 +1312,17 @@ impl GameState {
         // Handle Promotion Revert
         if m.promotion.is_some() {
             // Convert back to pawn
-            let promo_val = get_piece_value(piece.piece_type);
+            let promo_val = get_piece_value(piece.piece_type());
             let pawn_val = get_piece_value(PieceType::Pawn);
 
-            if piece.color == PlayerColor::White {
+            if piece.color() == PlayerColor::White {
                 self.material_score -= promo_val;
                 self.material_score += pawn_val;
             } else {
                 self.material_score += promo_val;
                 self.material_score -= pawn_val;
             }
-            piece.piece_type = PieceType::Pawn;
+            piece = Piece::new(PieceType::Pawn, piece.color());
         }
 
         // Move back to 'from'
@@ -1325,8 +1332,8 @@ impl GameState {
 
         // Restore captured piece
         if let Some(captured) = undo.captured_piece {
-            let value = get_piece_value(captured.piece_type);
-            if captured.color == PlayerColor::White {
+            let value = get_piece_value(captured.piece_type());
+            if captured.color() == PlayerColor::White {
                 self.material_score += value;
                 self.white_piece_count = self.white_piece_count.saturating_add(1);
             } else {
@@ -1342,12 +1349,12 @@ impl GameState {
         // If it was an EP capture, the captured pawn was on 'pawn_square' of the OLD en_passant state
         // But wait, we don't store "is_ep_capture" in UndoMove.
         // We can infer it: if piece is pawn, and to_square matches old_ep.square
-        if piece.piece_type == PieceType::Pawn {
+        if piece.piece_type() == PieceType::Pawn {
             if let Some(ep) = &undo.old_en_passant {
                 if m.to.x == ep.square.x && m.to.y == ep.square.y {
                     // It was an EP capture!
                     // Restore the captured pawn
-                    let captured_pawn = Piece::new(PieceType::Pawn, piece.color.opponent());
+                    let captured_pawn = Piece::new(PieceType::Pawn, piece.color().opponent());
 
                     self.board
                         .set_piece(ep.pawn_square.x, ep.pawn_square.y, captured_pawn);
@@ -1356,7 +1363,7 @@ impl GameState {
 
                     // Restore material
                     let value = get_piece_value(PieceType::Pawn);
-                    if captured_pawn.color == PlayerColor::White {
+                    if captured_pawn.color() == PlayerColor::White {
                         self.material_score += value;
                         self.white_piece_count = self.white_piece_count.saturating_add(1);
                     } else {
@@ -1368,7 +1375,7 @@ impl GameState {
         }
 
         // Handle Castling Revert
-        if piece.piece_type == PieceType::King {
+        if piece.piece_type() == PieceType::King {
             let dx = m.to.x - m.from.x;
             if dx.abs() > 1 {
                 // Castling was performed. Move rook back.

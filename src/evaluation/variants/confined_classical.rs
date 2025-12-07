@@ -99,17 +99,17 @@ fn evaluate_pieces_confined(
     let mut black_queen_out = false;
 
     for ((x, y), piece) in &game.board.pieces {
-        if piece.color == PlayerColor::Neutral {
+        if piece.color() == PlayerColor::Neutral {
             continue;
         }
 
-        let is_white = piece.color == PlayerColor::White;
+        let is_white = piece.color() == PlayerColor::White;
         let mut piece_score: i32 = 0;
 
-        match piece.piece_type {
+        match piece.piece_type() {
             PieceType::Rook => {
                 piece_score +=
-                    base::evaluate_rook(game, *x, *y, piece.color, white_king, black_king);
+                    base::evaluate_rook(game, *x, *y, piece.color(), white_king, black_king);
 
                 // Bonus for rook invading enemy territory (behind their obstacles)
                 let in_enemy_territory = if is_white { *y >= 8 } else { *y <= 1 };
@@ -120,7 +120,7 @@ fn evaluate_pieces_confined(
             PieceType::Queen | PieceType::RoyalQueen => {
                 // Less aggressive queen evaluation for Confined Classical
                 piece_score +=
-                    evaluate_queen_confined(game, *x, *y, piece.color, white_king, black_king);
+                    evaluate_queen_confined(game, *x, *y, piece.color(), white_king, black_king);
 
                 // Track if queen has left starting position
                 let start_y = if is_white { 1 } else { 8 };
@@ -134,7 +134,7 @@ fn evaluate_pieces_confined(
             }
             PieceType::Knight => {
                 // Custom knight eval: FORWARD development, not huddling around king
-                piece_score += evaluate_knight_confined(*x, *y, piece.color);
+                piece_score += evaluate_knight_confined(*x, *y, piece.color());
 
                 // Track development
                 let back_rank = if is_white { 1 } else { 8 };
@@ -148,7 +148,7 @@ fn evaluate_pieces_confined(
             }
             PieceType::Bishop => {
                 // Custom bishop eval: forward and into enemy territory
-                piece_score += evaluate_bishop_confined(*x, *y, piece.color);
+                piece_score += evaluate_bishop_confined(*x, *y, piece.color());
 
                 if is_white {
                     white_bishops += 1;
@@ -181,7 +181,7 @@ fn evaluate_pieces_confined(
                 piece_score += evaluate_pawn_confined(
                     *x,
                     *y,
-                    piece.color,
+                    piece.color(),
                     game.white_promo_rank,
                     game.black_promo_rank,
                 );
@@ -343,7 +343,7 @@ fn evaluate_development_confined(game: &GameState) -> i32 {
     let mut black_back_obstacles = 0;
 
     for ((_, y), piece) in &game.board.pieces {
-        if piece.piece_type == PieceType::Obstacle {
+        if piece.piece_type() == PieceType::Obstacle {
             if *y == 0 {
                 white_back_obstacles += 1;
             } else if *y == 9 {

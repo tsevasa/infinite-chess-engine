@@ -29,8 +29,8 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
         pieces.push(PieceInfo {
             x: *x,
             y: *y,
-            piece_type: piece.piece_type,
-            color: piece.color,
+            piece_type: piece.piece_type(),
+            color: piece.color(),
             alive: true,
         });
     }

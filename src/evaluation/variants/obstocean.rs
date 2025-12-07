@@ -82,20 +82,20 @@ fn evaluate_pieces_obstocean(
     let mut black_bishop_colors: (bool, bool) = (false, false);
 
     for ((x, y), piece) in &game.board.pieces {
-        if piece.color == PlayerColor::Neutral {
+        if piece.color() == PlayerColor::Neutral {
             continue;
         }
 
         let mut piece_score: i32 = 0;
 
-        match piece.piece_type {
+        match piece.piece_type() {
             PieceType::Rook | PieceType::Chancellor | PieceType::Amazon => {
                 piece_score +=
-                    base::evaluate_rook(game, *x, *y, piece.color, white_king, black_king);
+                    base::evaluate_rook(game, *x, *y, piece.color(), white_king, black_king);
             }
             PieceType::Queen | PieceType::RoyalQueen => {
                 piece_score +=
-                    base::evaluate_queen(game, *x, *y, piece.color, white_king, black_king);
+                    base::evaluate_queen(game, *x, *y, piece.color(), white_king, black_king);
             }
             PieceType::Knight
             | PieceType::Hawk
@@ -103,12 +103,12 @@ fn evaluate_pieces_obstocean(
             | PieceType::Centaur
             | PieceType::RoyalCentaur => {
                 // Obstocean Knight Rush: Just push forward
-                piece_score += evaluate_knight_obstocean(*x, *y, piece.color);
+                piece_score += evaluate_knight_obstocean(*x, *y, piece.color());
             }
             PieceType::Bishop => {
                 piece_score +=
-                    base::evaluate_bishop(game, *x, *y, piece.color, white_king, black_king);
-                if piece.color == PlayerColor::White {
+                    base::evaluate_bishop(game, *x, *y, piece.color(), white_king, black_king);
+                if piece.color() == PlayerColor::White {
                     white_bishops += 1;
                     if (*x + *y) % 2 == 0 {
                         white_bishop_colors.0 = true;
@@ -128,7 +128,7 @@ fn evaluate_pieces_obstocean(
                 piece_score += evaluate_pawn_position_obstocean(
                     *x,
                     *y,
-                    piece.color,
+                    piece.color(),
                     game.white_promo_rank,
                     game.black_promo_rank,
                 );
@@ -139,7 +139,7 @@ fn evaluate_pieces_obstocean(
         // NO CLOUD PENALTY for Obstocean
         // NO DEVELOPMENT PENALTY for Obstocean
 
-        if piece.color == PlayerColor::White {
+        if piece.color() == PlayerColor::White {
             score += piece_score;
         } else {
             score -= piece_score;
@@ -218,11 +218,11 @@ fn evaluate_pawn_structure_obstocean(game: &GameState) -> i32 {
     let mut black_pawn_files: Vec<i64> = Vec::new();
 
     for ((x, y), piece) in &game.board.pieces {
-        if piece.piece_type == PieceType::Pawn {
-            if piece.color == PlayerColor::White {
+        if piece.piece_type() == PieceType::Pawn {
+            if piece.color() == PlayerColor::White {
                 white_pawns.push((*x, *y));
                 white_pawn_files.push(*x);
-            } else if piece.color == PlayerColor::Black {
+            } else if piece.color() == PlayerColor::Black {
                 black_pawns.push((*x, *y));
                 black_pawn_files.push(*x);
             }
@@ -347,19 +347,19 @@ fn evaluate_tunnel(px: i64, py: i64, promo_rank: i64, board: &Board, is_white: b
 
         // Center obstacle
         if let Some(p) = board.get_piece(&px, &check_y) {
-            if p.piece_type == PieceType::Obstacle {
+            if p.piece_type() == PieceType::Obstacle {
                 weighted_density += 1.0;
             }
         }
 
         // Adjacent obstacles (eating shield) - worth more
         if let Some(p) = board.get_piece(&(px - 1), &check_y) {
-            if p.piece_type == PieceType::Obstacle {
+            if p.piece_type() == PieceType::Obstacle {
                 weighted_density += 2.0;
             }
         }
         if let Some(p) = board.get_piece(&(px + 1), &check_y) {
-            if p.piece_type == PieceType::Obstacle {
+            if p.piece_type() == PieceType::Obstacle {
                 weighted_density += 2.0;
             }
         }
@@ -434,7 +434,7 @@ fn evaluate_free_runner(
     for i in 1..=limit {
         let check_y = if is_white { py + i } else { py - i };
         if let Some(p) = board.get_piece(&px, &check_y) {
-            if p.color == enemy_color {
+            if p.color() == enemy_color {
                 return 0; // Contested, no bonus
             }
         }
@@ -471,7 +471,7 @@ fn get_closest_piece_distance(
 ) -> i64 {
     let mut min_dist = 1000i64;
     for ((x, y), piece) in &board.pieces {
-        if piece.color == color {
+        if piece.color() == color {
             let dist = (x - target_x).abs().max((y - target_y).abs());
             if dist < min_dist {
                 min_dist = dist;

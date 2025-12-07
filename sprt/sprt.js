@@ -1,11 +1,21 @@
 #!/usr/bin/env node
 /**
- * HydroChess Web SPRT Helper
+ * HydroChess SPRT Testing Helper
  *
+ * Usage:
+ *   node sprt.js          - Run web-based SPRT (opens browser UI)
+ *   node sprt.js --native - Run native iwasm-based SPRT (CLI mode)
+ * 
+ * Web mode:
  * - Treats root/pkg as the OLD engine snapshot
  * - Builds a NEW web WASM into root/pkg-new
  * - Copies both into sprt/web/pkg-old and sprt/web/pkg-new
  * - Starts `npx serve .` in sprt/web so browser UI can import both
+ * 
+ * Native mode:
+ * - Uses iwasm for high-performance testing
+ * - Runs entirely from the command line
+ * - Faster than browser-based testing
  */
 
 const fs = require('fs');
@@ -16,12 +26,24 @@ const SPRT_DIR = __dirname;
 const PROJECT_ROOT = path.join(SPRT_DIR, '..');
 
 // Root-level packages
-const ROOT_PKG_OLD = path.join(PROJECT_ROOT, 'pkg-old');  // existing old snapshot
+const ROOT_PKG_OLD = path.join(PROJECT_ROOT, 'pkg-old');
 
 // Web UI directories
 const WEB_DIR = path.join(SPRT_DIR, 'web');
 const WEB_PKG_OLD_DIR = path.join(WEB_DIR, 'pkg-old');
 const WEB_PKG_NEW_DIR = path.join(WEB_DIR, 'pkg-new');
+
+// Check if --native flag is passed
+const isNativeMode = process.argv.includes('--native');
+
+function hasIwasm() {
+    try {
+        execSync('iwasm --version', { stdio: 'pipe' });
+        return true;
+    } catch {
+        return false;
+    }
+}
 
 function copyDirectory(src, dest) {
     if (!fs.existsSync(src)) {
@@ -90,10 +112,8 @@ function startServer() {
 
     const child = spawn('npx', ['serve', '.'], {
         cwd: WEB_DIR,
-        // Capture stdout so we can detect the chosen port, but do not forward
-        // the raw logs. Keep stderr inherited for error visibility.
         stdio: ['ignore', 'pipe', 'inherit'],
-        shell: true, // avoid EINVAL on Windows by using shell resolution for npx
+        shell: true,
     });
 
     let sawUrl = false;
@@ -124,13 +144,87 @@ function startServer() {
     });
 }
 
+function runNativeSprt() {
+    console.log('[native-sprt] Starting native SPRT testing...');
+
+    // Build WASI binary if needed
+    const wasmPath = path.join(PROJECT_ROOT, 'target', 'wasm32-wasip1', 'release', 'spsa_engine.wasm');
+    if (!fs.existsSync(wasmPath)) {
+        console.log('[native-sprt] Building WASI engine...');
+        try {
+            execSync('cargo build --target wasm32-wasip1 --release --bin spsa_engine', {
+                cwd: PROJECT_ROOT,
+                stdio: 'inherit',
+            });
+        } catch (e) {
+            console.error('[native-sprt] Build failed:', e.message);
+            process.exit(1);
+        }
+    }
+
+    // Forward remaining args to sprt-native.mjs
+    const forwardArgs = process.argv.slice(2).filter(a => a !== '--native');
+
+    // Use spawn to run the native SPRT script
+    const child = spawn('node', ['sprt-native.mjs', ...forwardArgs], {
+        cwd: SPRT_DIR,
+        stdio: 'inherit',
+    });
+
+    child.on('exit', (code) => {
+        process.exit(code ?? 0);
+    });
+}
+
 (function main() {
-    try {
-        snapshotOldFromRoot();
-        buildNewWebPkg();
-        startServer();
-    } catch (e) {
-        console.error('[web-sprt] Fatal error:', e.message);
-        process.exit(1);
+    // Show help if requested
+    if (process.argv.includes('--help') || process.argv.includes('-h')) {
+        console.log(`
+HydroChess SPRT Testing Helper
+
+Usage:
+  node sprt.js              Run web-based SPRT (opens browser UI)
+  node sprt.js --native     Run native iwasm-based SPRT (CLI mode)
+
+Web Mode:
+  Opens a browser UI for running SPRT tests with visual feedback.
+  Requires pkg-old directory with baseline engine build.
+
+Native Mode Options:
+  --games N        Number of game pairs (default: 100)
+  --tc TIME        Time control in seconds per move (default: 0.1)
+  --concurrency N  Number of parallel workers (default: 8)
+  --variant NAME   Variant to test (default: Classical)
+  --elo0 N         H0 Elo bound (default: -5)
+  --elo1 N         H1 Elo bound (default: 5)
+  --help           Show this help message
+
+Examples:
+  node sprt.js                           # Web mode
+  node sprt.js --native                  # Native mode, default settings
+  node sprt.js --native --games 500      # Native mode, 500 game pairs
+  node sprt.js --native --variant Core   # Test Core variant
+`);
+        process.exit(0);
+    }
+
+    if (isNativeMode) {
+        // Check for iwasm
+        if (!hasIwasm()) {
+            console.error('[native-sprt] Error: iwasm not found in PATH');
+            console.error('[native-sprt] Please install iwasm from https://github.com/bytecodealliance/wasm-micro-runtime');
+            process.exit(1);
+        }
+        runNativeSprt();
+    } else {
+        // Web mode
+        try {
+            snapshotOldFromRoot();
+            buildNewWebPkg();
+            startServer();
+        } catch (e) {
+            console.error('[web-sprt] Fatal error:', e.message);
+            process.exit(1);
+        }
     }
 })();

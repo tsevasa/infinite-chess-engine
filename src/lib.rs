@@ -395,8 +395,8 @@ impl Engine {
         // console log all legal moves in the position
         let moves = self.game.get_legal_moves();
         for m in &moves {
-            let piece_code = m.piece.piece_type.to_str();
-            let color_code = m.piece.color.to_str();
+            let piece_code = m.piece.piece_type().to_str();
+            let color_code = m.piece.color().to_str();
             let promo_part = match m.promotion {
                 Some(p) => format!(" promo={}", p.to_str()),
                 None => String::new(),
@@ -555,6 +555,7 @@ impl Engine {
 
         // Snapshot TT stats *before* starting the timed search so logs reflect the
         // state at the beginning of the move.
+        #[allow(unused_variables)]
         let pre_stats = crate::search::get_current_tt_stats();
 
         #[cfg(target_arch = "wasm32")]
@@ -603,12 +604,9 @@ impl Engine {
             }
         }
 
-        if let Some((best_move, eval, _stats)) = search::get_best_move(
-            &mut self.game,
-            50,
-            effective_limit,
-            silent,
-        ) {
+        if let Some((best_move, eval, _stats)) =
+            search::get_best_move(&mut self.game, 50, effective_limit, silent)
+        {
             let js_move = JsMoveWithEval {
                 from: format!("{},{}", best_move.from.x, best_move.from.y),
                 to: format!("{},{}", best_move.to.x, best_move.to.y),
