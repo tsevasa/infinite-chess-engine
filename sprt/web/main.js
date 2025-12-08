@@ -319,7 +319,7 @@ function generateICNFromWorkerLog(workerLog, gameIndex, result, newPlaysWhite, e
     const whiteEngine = newPlaysWhite ? 'HydroChess New' : 'HydroChess Old';
     const blackEngine = newPlaysWhite ? 'HydroChess Old' : 'HydroChess New';
 
-    const displayVariantName = (variantName || 'Classical').replace(/_/g, ' ');
+    const displayVariantName = variantName || 'Classical';
 
     const headerList = [
         `[Event "SPRT Test Game ${gameIndex}"]`,
@@ -893,7 +893,14 @@ async function runSprt() {
                     }
                 };
 
-                startWorker(worker, i);
+                worker.onerror = (e) => {
+                    activeWorkers--;
+                    resolve(undefined);
+                };
+
+                if (!startWorker(worker, i)) {
+                    resolve(undefined);
+                }
             });
         })
     );
