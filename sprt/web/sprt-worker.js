@@ -641,9 +641,13 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove,
         // Add eval if available
         if (typeof move.eval === 'number') {
             if (commands) commands += ' ';
-            // Format eval as centipawns with sign, e.g. +0.52 or -1.23
-            const evalCp = (move.eval / 100).toFixed(2);
-            const evalStr = move.eval >= 0 ? `+${evalCp}` : evalCp;
+            // If sideToMove is Black, negate the score so it's always from White's perspective.
+            let evalVal = move.eval;
+            if (sideToMove === 'b') {
+                evalVal = -evalVal;
+            }
+            const evalCp = (evalVal / 100).toFixed(2);
+            const evalStr = evalVal >= 0 ? `+${evalCp}` : evalCp;
             commands += `[%eval ${evalStr}]`;
         }
         // Add depth as a text comment (not a command)
