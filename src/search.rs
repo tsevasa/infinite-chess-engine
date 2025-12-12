@@ -421,8 +421,8 @@ impl Searcher {
                 let mat_idx = (game.material_hash & CORRHIST_MASK) as usize;
                 let mat_corr = self.material_corrhist[color_idx][mat_idx];
 
-                // 60% pawn, 40% material (pawn structure was key in these variants)
-                (pawn_corr * 60 + mat_corr * 40) / (CORRHIST_GRAIN * 100 / 100)
+                // 60% pawn, 40% material - divide by (GRAIN * 100) for proper percentage scaling
+                (pawn_corr * 60 + mat_corr * 40) / (CORRHIST_GRAIN * 100)
             }
             CorrHistMode::NonPawnBased => {
                 // Non-pawn + Material + Last-move (for other variants)
@@ -436,8 +436,7 @@ impl Searcher {
                 let lastmove_corr = self.lastmove_corrhist[lastmove_idx];
 
                 // 50% non-pawn, 30% material, 20% last-move
-                (nonpawn_corr * 50 + mat_corr * 30 + lastmove_corr * 20)
-                    / (CORRHIST_GRAIN * 100 / 100)
+                (nonpawn_corr * 50 + mat_corr * 30 + lastmove_corr * 20) / (CORRHIST_GRAIN * 100)
             }
         };
 
