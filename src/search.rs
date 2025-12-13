@@ -52,6 +52,18 @@ pub enum CorrHistMode {
     NonPawnBased,
 }
 
+/// Node type for alpha-beta search.
+/// Used to enable more aggressive pruning at expected cut-nodes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NodeType {
+    /// Principal Variation node - full window search, no aggressive pruning
+    PV,
+    /// Cut node - expected to fail high (opponent will have a refutation)
+    Cut,
+    /// All node - expected to fail low (we'll search all moves)
+    All,
+}
+
 // ============================================================================
 // Tunable search parameters - accessed via param accessor functions
 // ============================================================================
@@ -1166,15 +1178,42 @@ pub fn get_best_moves_multipv(
             // For MultiPV, we need to search all moves to get their scores.
             // First move gets full window, subsequent moves use PVS with MultiPV-aware alpha.
             let score = if move_idx == 0 {
-                -negamax(&mut searcher, game, depth - 1, 1, -INFINITY, INFINITY, true)
+                -negamax(
+                    &mut searcher,
+                    game,
+                    depth - 1,
+                    1,
+                    -INFINITY,
+                    INFINITY,
+                    true,
+                    NodeType::PV,
+                )
             } else {
                 // Use PVS for efficiency with MultiPV-aware alpha bound
                 let alpha = multipv_alpha;
 
-                let mut s = -negamax(&mut searcher, game, depth - 1, 1, -alpha - 1, -alpha, true);
+                let mut s = -negamax(
+                    &mut searcher,
+                    game,
+                    depth - 1,
+                    1,
+                    -alpha - 1,
+                    -alpha,
+                    true,
+                    NodeType::Cut,
+                );
                 if s > alpha && !searcher.stopped {
                     // Re-search with full window to get accurate score
-                    s = -negamax(&mut searcher, game, depth - 1, 1, -INFINITY, INFINITY, true);
+                    s = -negamax(
+                        &mut searcher,
+                        game,
+                        depth - 1,
+                        1,
+                        -INFINITY,
+                        INFINITY,
+                        true,
+                        NodeType::PV,
+                    );
                 }
                 s
             };
@@ -1422,12 +1461,39 @@ fn negamax_root(
         let score;
         if legal_moves == 1 {
             // Full window search for first legal move
-            score = -negamax(searcher, game, depth - 1, 1, -beta, -alpha, true);
+            score = -negamax(
+                searcher,
+                game,
+                depth - 1,
+                1,
+                -beta,
+                -alpha,
+                true,
+                NodeType::PV,
+            );
         } else {
             // PVS: Null window first, then re-search if it improves alpha
-            let mut s = -negamax(searcher, game, depth - 1, 1, -alpha - 1, -alpha, true);
+            let mut s = -negamax(
+                searcher,
+                game,
+                depth - 1,
+                1,
+                -alpha - 1,
+                -alpha,
+                true,
+                NodeType::Cut,
+            );
             if s > alpha && s < beta {
-                s = -negamax(searcher, game, depth - 1, 1, -beta, -alpha, true);
+                s = -negamax(
+                    searcher,
+                    game,
+                    depth - 1,
+                    1,
+                    -beta,
+                    -alpha,
+                    true,
+                    NodeType::PV,
+                );
             }
             score = s;
         }
@@ -1497,6 +1563,7 @@ fn negamax(
     mut alpha: i32,
     mut beta: i32,
     allow_null: bool,
+    node_type: NodeType,
 ) -> i32 {
     // Save original alpha/beta for TT flag determination (per Wikipedia pseudocode)
     let alpha_orig = alpha;
@@ -1553,7 +1620,7 @@ fn negamax(
     }
 
     let in_check = game.is_in_check();
-    let is_pv = beta > alpha + 1;
+    let is_pv = node_type == NodeType::PV;
 
     // Base case: quiescence search at leaf nodes
     if depth == 0 {
@@ -1611,11 +1678,11 @@ fn negamax(
         true // Assume improving at root or when in check
     };
 
+    // Derive cut_node from node_type parameter
+    let cut_node = node_type == NodeType::Cut;
+
     // Internal Iterative Reductions (IIR): if we have no TT move in an
-    // expected cut-node (Stockfish-style cutNode: non-PV, beta == alpha+1),
-    // and we are not in check, reduce depth slightly. The idea is that the
-    // node is likely unimportant if no best move was stored previously.
-    let cut_node = !is_pv && beta == alpha + 1;
+    // expected cut-node, and we are not in check, reduce depth slightly.
     if tt_move.is_none() && cut_node && !in_check && depth >= 4 {
         depth -= 1;
     }
@@ -1650,6 +1717,7 @@ fn negamax(
                     -beta,
                     -beta + 1,
                     false,
+                    NodeType::Cut, // NMP verification search
                 );
 
                 game.unmake_null_move();
@@ -1725,7 +1793,8 @@ fn negamax(
                 ply + 1,
                 -beta,
                 -beta + 1,
-                false, // disallow null move in multi-cut searches
+                false,         // disallow null move in multi-cut searches
+                NodeType::Cut, // Multi-Cut verification
             );
 
             game.undo_move(m, undo);
@@ -1824,8 +1893,26 @@ fn negamax(
 
         let score;
         if legal_moves == 1 {
+            // Child type depends on current node type:
+            // PV → PV for first child, Cut → All, All → Cut
+            let child_type = if is_pv {
+                NodeType::PV
+            } else if cut_node {
+                NodeType::All
+            } else {
+                NodeType::Cut
+            };
             // Full window search for first legal move
-            score = -negamax(searcher, game, depth - 1, ply + 1, -beta, -alpha, true);
+            score = -negamax(
+                searcher,
+                game,
+                depth - 1,
+                ply + 1,
+                -beta,
+                -alpha,
+                true,
+                child_type,
+            );
         } else {
             // Late Move Reductions
             let mut reduction = 0;
@@ -1898,6 +1985,13 @@ fn negamax(
                 new_depth as usize
             };
 
+            // Child type for non-first moves: alternate Cut/All
+            let child_type = if cut_node {
+                NodeType::All
+            } else {
+                NodeType::Cut
+            };
+
             // Null window search with possible reduction
             let mut s = -negamax(
                 searcher,
@@ -1907,11 +2001,23 @@ fn negamax(
                 -alpha - 1,
                 -alpha,
                 true,
+                child_type,
             );
 
             // Re-search at full depth if it looks promising
             if s > alpha && (reduction > 0 || s < beta) {
-                s = -negamax(searcher, game, depth - 1, ply + 1, -beta, -alpha, true);
+                // Re-search with PV-like search if we're in PV, otherwise same child type
+                let research_type = if is_pv { NodeType::PV } else { child_type };
+                s = -negamax(
+                    searcher,
+                    game,
+                    depth - 1,
+                    ply + 1,
+                    -beta,
+                    -alpha,
+                    true,
+                    research_type,
+                );
             }
             score = s;
         }
