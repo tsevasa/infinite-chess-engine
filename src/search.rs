@@ -1989,39 +1989,38 @@ fn negamax(
             );
         } else {
             // Late Move Reductions
-            let mut reduction = 0;
+            let mut reduction: i32 = 0;
             if depth >= lmr_min_depth()
                 && legal_moves >= lmr_min_moves()
                 && !in_check
                 && !is_capture
             {
                 reduction = 1
-                    + (legal_moves as f32).ln() as usize * (depth as f32).ln() as usize
-                        / lmr_divisor();
+                    + ((legal_moves as f32).ln() * (depth as f32).ln() / lmr_divisor() as f32)
+                        as i32;
 
                 // Reduce more when position is not improving
                 if !improving {
                     reduction += 1;
                 }
 
-                // History-based LMR adjustments
-                // let hist_idx = hash_move_dest(m);
-                // let hist_score = searcher.history[m.piece.piece_type() as usize][hist_idx];
+                // History-adjusted LMR (simple, low-overhead version)
+                // Only use main history - continuation history lookups are too expensive.
+                // Only reduce LESS for good history (safe); don't increase for bad (risky).
+                let hist_idx = hash_move_dest(&m);
+                let hist_score = searcher.history[m.piece.piece_type() as usize][hist_idx];
 
-                // // Reduce more for moves with bad history
-                // if hist_score < -1000 {
-                //     reduction += 1;
-                // }
-                // Reduce less for moves with good history
-                // else if hist_score > 1000 {
-                //     reduction = reduction.saturating_sub(1);
-                // }
+                // Reduce less for moves with good history (threshold: ~50% of max)
+                if hist_score > 2000 && reduction > 0 {
+                    reduction -= 1;
+                }
 
-                reduction = reduction.min(depth - 2);
+                // Ensure reduction stays in valid range [0, depth-2]
+                reduction = reduction.clamp(0, (depth as i32) - 2);
             }
 
             // Base child depth after LMR (with singular extension if applicable)
-            let mut new_depth = depth as i32 - 1 + extension as i32 - reduction as i32;
+            let mut new_depth = depth as i32 - 1 + extension as i32 - reduction;
 
             // History Leaf Pruning (Fruit-style)
             // Only in non-PV, quiet, shallow nodes and after enough moves
