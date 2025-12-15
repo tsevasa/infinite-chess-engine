@@ -27,8 +27,9 @@ pub enum MoveStage {
     Killer1,
     Killer2,
     GenerateQuiets,
-    Quiets,
-    BadCaptures,
+    GoodQuiets,  // Quiets with history above threshold
+    BadCaptures, // Bad SEE captures between good and bad quiets
+    BadQuiets,   // Quiets with low history (tried last)
     Done,
 }
 
@@ -64,16 +65,20 @@ pub struct StagedMoveGen {
     killer1_yielded: bool,
     killer2_yielded: bool,
 
-    // Quiets (sorted by history)
-    quiets: Vec<(Move, i32)>, // (move, score)
-    quiet_idx: usize,
-
     // Excluded move (for singular extension verification)
     excluded_move: Option<Move>,
 
     // Skip quiet moves flag (for FutilityMoveCount pruning)
     // When set, the generator will skip generating/returning quiet moves
     skip_quiets: bool,
+
+    // Good quiets (above threshold, tried before bad captures)
+    good_quiets: Vec<(Move, i32)>,
+    good_quiet_idx: usize,
+
+    // Bad quiets (below threshold, tried after bad captures)
+    bad_quiets: Vec<Move>,
+    bad_quiet_idx: usize,
 }
 
 impl StagedMoveGen {
@@ -112,10 +117,12 @@ impl StagedMoveGen {
             killer2,
             killer1_yielded: false,
             killer2_yielded: false,
-            quiets: Vec::with_capacity(64),
-            quiet_idx: 0,
             excluded_move: None,
             skip_quiets: false,
+            good_quiets: Vec::with_capacity(48),
+            good_quiet_idx: 0,
+            bad_quiets: Vec::with_capacity(32),
+            bad_quiet_idx: 0,
         }
     }
 
@@ -522,7 +529,23 @@ impl StagedMoveGen {
                     let killer1 = self.killer1.clone();
                     let killer2 = self.killer2.clone();
 
+                    // Stockfish uses -14000 threshold for good/bad quiet separation.
+                    // Our history scale is similar, so use a proportional threshold.
+                    // -4000 is approximately 25% of max history (16384).
+                    const GOOD_QUIET_THRESHOLD: i32 = -4000;
+
                     for m in quiets_raw {
+                        // Skip TT move and killers
+                        if Self::moves_match(&m, &self.tt_move) {
+                            continue;
+                        }
+                        if Self::moves_match(&m, &killer1) || Self::moves_match(&m, &killer2) {
+                            continue;
+                        }
+                        if self.is_excluded(&m) {
+                            continue;
+                        }
+
                         let score = Self::score_quiet(
                             game,
                             searcher,
@@ -534,35 +557,25 @@ impl StagedMoveGen {
                             &killer1,
                             &killer2,
                         );
-                        self.quiets.push((m, score));
+
+                        // Separate good and bad quiets by threshold
+                        if score > GOOD_QUIET_THRESHOLD {
+                            self.good_quiets.push((m, score));
+                        } else {
+                            self.bad_quiets.push(m);
+                        }
                     }
 
-                    // Sort quiets by score (highest first)
-                    self.quiets.sort_by(|a, b| b.1.cmp(&a.1));
+                    // Sort good quiets by score (highest first)
+                    self.good_quiets.sort_by(|a, b| b.1.cmp(&a.1));
 
-                    self.stage = MoveStage::Quiets;
+                    self.stage = MoveStage::GoodQuiets;
                 }
 
-                MoveStage::Quiets => {
-                    while self.quiet_idx < self.quiets.len() {
-                        let (m, _) = self.quiets[self.quiet_idx].clone();
-                        self.quiet_idx += 1;
-
-                        // Skip TT move and killers (already yielded)
-                        if Self::moves_match(&m, &self.tt_move) {
-                            continue;
-                        }
-                        if self.killer1_yielded && Self::moves_match(&m, &self.killer1) {
-                            continue;
-                        }
-                        if self.killer2_yielded && Self::moves_match(&m, &self.killer2) {
-                            continue;
-                        }
-                        // Skip excluded move
-                        if self.is_excluded(&m) {
-                            continue;
-                        }
-
+                MoveStage::GoodQuiets => {
+                    while self.good_quiet_idx < self.good_quiets.len() {
+                        let (m, _) = self.good_quiets[self.good_quiet_idx].clone();
+                        self.good_quiet_idx += 1;
                         return Some(m);
                     }
                     self.stage = MoveStage::BadCaptures;
@@ -576,6 +589,21 @@ impl StagedMoveGen {
                         if self.is_excluded(&m) {
                             continue;
                         }
+                        return Some(m);
+                    }
+                    // After bad captures, try bad quiets
+                    self.stage = MoveStage::BadQuiets;
+                }
+
+                MoveStage::BadQuiets => {
+                    // Skip if we're skipping quiets
+                    if self.skip_quiets {
+                        self.stage = MoveStage::Done;
+                        continue;
+                    }
+                    while self.bad_quiet_idx < self.bad_quiets.len() {
+                        let m = self.bad_quiets[self.bad_quiet_idx].clone();
+                        self.bad_quiet_idx += 1;
                         return Some(m);
                     }
                     self.stage = MoveStage::Done;
