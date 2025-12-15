@@ -486,6 +486,12 @@ pub struct Searcher {
     pub nonpawn_corrhist: Box<[[i32; CORRHIST_SIZE]; 2]>,
     pub material_corrhist: Box<[[i32; CORRHIST_SIZE]; 2]>,
     pub lastmove_corrhist: Box<[i32; LASTMOVE_CORRHIST_SIZE]>,
+
+    /// TT Move History: tracks reliability of TT moves.
+    /// Positive values = TT moves tend to be best moves.
+    /// Negative values = TT moves often fail.
+    /// Uses gravity-based update formula for smoothing.
+    pub tt_move_history: i32,
 }
 
 impl Searcher {
@@ -533,6 +539,7 @@ impl Searcher {
             nonpawn_corrhist: Box::new([[0i32; CORRHIST_SIZE]; 2]),
             material_corrhist: Box::new([[0i32; CORRHIST_SIZE]; 2]),
             lastmove_corrhist: Box::new([0i32; LASTMOVE_CORRHIST_SIZE]),
+            tt_move_history: 0,
         }
     }
 
@@ -1918,7 +1925,12 @@ fn negamax(
 
         if is_tt_move && !is_pv {
             if let Some((tt_score, singular_depth)) = se_conditions {
-                let singular_beta = tt_score - (depth as i32) * 3;
+                // Singular extension margin with TT Move History adjustment
+                // Stockfish uses: 897 * ttMoveHistory / 127649
+                // When TT moves are reliable (high ttMoveHistory), we can use a tighter margin
+                // (less extension). When unreliable (low), use a more generous margin.
+                let tt_history_adj = searcher.tt_move_history / 150; // ~= 897/127649 * 16384
+                let singular_beta = tt_score - (depth as i32) * 3 + tt_history_adj;
 
                 // Undo the move we just made so we can search alternatives
                 game.undo_move(&m, undo.clone());
@@ -1987,6 +1999,13 @@ fn negamax(
                     extension = 1;
                 } else if se_best >= beta && !is_pv {
                     // Multi-cut: alternatives also beat beta, prune the whole subtree
+                    // Apply negative penalty to TT Move History - the TT move wasn't truly singular
+                    // Stockfish uses: max(-400 - 100 * depth, -4000)
+                    let penalty = (-400 - 100 * depth as i32).max(-4000);
+                    let max_tt_hist = 8192;
+                    searcher.tt_move_history +=
+                        penalty - searcher.tt_move_history * penalty.abs() / max_tt_hist;
+
                     game.undo_move(&m, undo);
                     return beta;
                 }
@@ -2040,6 +2059,14 @@ fn negamax(
 
                 // Reduce less for moves with good history (threshold: ~50% of max)
                 if hist_score > 2000 && reduction > 0 {
+                    reduction -= 1;
+                }
+
+                // TT Move History adjustment:
+                // If TT moves have been unreliable (low tt_move_history), reduce less
+                // since the move ordering from TT may not be trustworthy.
+                // Only adjust for significant negative values to avoid overhead.
+                if searcher.tt_move_history < -1000 && reduction > 0 {
                     reduction -= 1;
                 }
 
@@ -2292,7 +2319,34 @@ fn negamax(
     } else {
         TTFlag::Exact
     };
-    store_tt_with_shared(searcher, hash, depth, tt_flag, best_score, best_move, ply);
+    store_tt_with_shared(
+        searcher,
+        hash,
+        depth,
+        tt_flag,
+        best_score,
+        best_move.clone(),
+        ply,
+    );
+
+    // Update TT Move History (Stockfish-style)
+    // Tracks how reliable TT moves are: positive = TT moves tend to be best.
+    // Only update in non-PV nodes to get clean cutoff/fail statistics.
+    if !is_pv {
+        if let Some(ref bm) = best_move {
+            // Check if best move matches the TT move
+            let tt_move_matched = tt_move
+                .as_ref()
+                .map_or(false, |tm| tm.from == bm.from && tm.to == bm.to);
+
+            // Gravity-based update: bonus = delta - entry * delta / max
+            // Stockfish uses 8192 as max, bonuses +809/-865
+            let delta: i32 = if tt_move_matched { 809 } else { -865 };
+            let max_tt_history = 8192;
+            searcher.tt_move_history +=
+                delta - searcher.tt_move_history * delta.abs() / max_tt_history;
+        }
+    }
 
     // Update correction history when conditions are met:
     // - Not in check
