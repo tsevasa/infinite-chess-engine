@@ -2092,6 +2092,44 @@ fn negamax(
                     true,
                     research_type,
                 );
+
+                // Post LMR continuation history update
+                // When a reduced search fails high and we had to re-search, the move
+                // proved to be good - give it a bonus in continuation history.
+                //
+                // Key design decisions for generalized (non-Stockfish-tuned) bonus:
+                // 1. Depth-proportional: deeper searches = more reliable signal = bigger bonus
+                // 2. Scaled down: LMR re-search is weaker signal than beta-cutoff (~1/3 bonus)
+                // 3. Quiets only: continuation history only helps quiet move ordering
+                if reduction > 0 && !is_capture && !is_promotion {
+                    // Depth-scaled bonus: ~100 * depth (compared to ~300 * depth for cutoffs)
+                    // This is roughly 1/3 of the beta-cutoff bonus, appropriate since
+                    // "failed high after reduction" is a weaker signal than "caused cutoff"
+                    let lmr_bonus = 100 * depth as i32;
+                    let max_history: i32 = params::DEFAULT_HISTORY_MAX_GRAVITY;
+                    let cur_from_hash = hash_coord_32(m.from.x, m.from.y);
+                    let cur_to_hash = hash_coord_32(m.to.x, m.to.y);
+
+                    // Update continuation histories at ply offsets -1, -2, -4
+                    // (matching the existing beta-cutoff update pattern)
+                    for &plies_ago in &[0usize, 1, 3] {
+                        if ply >= plies_ago + 1 {
+                            if let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1]
+                            {
+                                let prev_piece =
+                                    searcher.moved_piece_history[ply - plies_ago - 1] as usize;
+                                if prev_piece < 16 {
+                                    let prev_to_hash =
+                                        hash_coord_32(prev_move.to.x, prev_move.to.y);
+                                    let entry = &mut searcher.cont_history[prev_piece]
+                                        [prev_to_hash][cur_from_hash][cur_to_hash];
+                                    // Use gravity-based update: entry += bonus - entry * bonus / max
+                                    *entry += lmr_bonus - *entry * lmr_bonus / max_history;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             score = s;
         }
