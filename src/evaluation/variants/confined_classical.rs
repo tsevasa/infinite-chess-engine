@@ -23,10 +23,21 @@ const BACK_OBSTACLE_VALUE: i32 = 30; // Value of each back-rank obstacle (protec
 #[inline]
 pub fn evaluate(game: &GameState) -> i32 {
     // Check for insufficient material draw
-    if base::is_insufficient_material(&game.board) {
-        return 0;
+    match crate::evaluation::insufficient_material::evaluate_insufficient_material(&game.board) {
+        Some(0) => return 0, // Dead draw
+        Some(divisor) => {
+            // Drawish - dampen eval
+            return evaluate_inner(game) / divisor;
+        }
+        None => {} // Sufficient - continue to normal eval
     }
 
+    evaluate_inner(game)
+}
+
+/// Core evaluation logic - skips insufficient material check
+#[inline]
+fn evaluate_inner(game: &GameState) -> i32 {
     // Start with material score
     let mut score = game.material_score;
 

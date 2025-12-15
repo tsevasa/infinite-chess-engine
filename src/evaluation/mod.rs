@@ -6,18 +6,19 @@
 
 pub mod base;
 pub mod helpers;
+pub mod insufficient_material;
 pub mod pieces;
 pub mod variants;
 
+use crate::Variant;
 use crate::board::PlayerColor;
 use crate::game::GameState;
-use crate::Variant;
 
 // Re-export commonly used items
-pub use base::{calculate_initial_material, get_piece_value, is_insufficient_material};
+pub use base::{calculate_initial_material, get_piece_value};
 
 #[cfg(feature = "eval_tuning")]
-pub use base::{reset_eval_features, snapshot_eval_features, EvalFeatures};
+pub use base::{EvalFeatures, reset_eval_features, snapshot_eval_features};
 
 /// Main evaluation entry point.
 #[inline]
