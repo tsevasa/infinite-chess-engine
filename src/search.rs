@@ -1682,6 +1682,16 @@ fn negamax(
         true // Assume improving at root or when in check
     };
 
+    // Opponent worsening heuristic (Stockfish-style)
+    // True if our static eval is better than the negation of the previous ply's eval.
+    // This means the opponent's last move made their position worse (our position got better).
+    // Used to make pruning more aggressive since opponent is making poor moves.
+    let opponent_worsening = if ply >= 1 && !in_check {
+        static_eval > -searcher.eval_stack[ply - 1]
+    } else {
+        false // Conservative default
+    };
+
     // Derive cut_node from node_type parameter
     let cut_node = node_type == NodeType::Cut;
 
@@ -1783,10 +1793,23 @@ fn negamax(
         None
     };
 
-    // Futility pruning flag
+    // Futility pruning setup
+    // Margin adjustments based on improving/opponent_worsening (Stockfish-style):
+    // - If improving: we can prune more aggressively (reduce margin)
+    // - If opponent_worsening: opponent making poor moves, prune more aggressively
     let futility_pruning = !in_check && !is_pv && depth <= 3;
     let futility_base = if futility_pruning {
-        static_eval + futility_margin(depth)
+        // Base margin from tuned parameters
+        let base_margin = futility_margin(depth);
+        // Reduce margin when improving or opponent_worsening (more aggressive pruning)
+        // Each factor reduces margin by ~20 centipawns per depth level
+        let improving_adj = if improving { 20 * depth as i32 } else { 0 };
+        let opponent_adj = if opponent_worsening {
+            10 * depth as i32
+        } else {
+            0
+        };
+        static_eval + base_margin - improving_adj - opponent_adj
     } else {
         0
     };
@@ -1818,6 +1841,7 @@ fn negamax(
         // When we've searched enough moves, stop generating quiets entirely.
         // Conditions from Stockfish: !rootNode && non_pawn_material && !is_loss(bestValue)
         // Formula: threshold = (3 + depth*depth) / (2 - improving)
+        // Opponent_worsening also reduces threshold (more aggressive pruning)
         if ply > 0 && !in_check && best_score > -MATE_SCORE {
             // Check for piece material (at least one non-pawn piece)
             // Using cached piece counts from GameState
@@ -1828,8 +1852,14 @@ fn negamax(
             };
 
             if has_material {
+                // Divisor: 1 if improving, 2 if not
+                // Additional reduction when opponent_worsening
                 let improving_divisor = if improving { 1 } else { 2 };
-                let futility_move_count = (3 + depth * depth) / improving_divisor;
+                let mut futility_move_count = (3 + depth * depth) / improving_divisor;
+                // When opponent is worsening, reduce threshold by ~25%
+                if opponent_worsening {
+                    futility_move_count = futility_move_count * 3 / 4;
+                }
                 if legal_moves >= futility_move_count {
                     movegen.skip_quiet_moves();
                 }
