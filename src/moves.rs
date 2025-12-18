@@ -3,11 +3,10 @@ use crate::game::{EnPassantState, GameRules};
 use crate::utils::is_prime_i64;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 
 /// Stack-allocated move list with inline capacity of 128 moves.
 /// Spills to heap if this limit is exceeded, preventing panics.
-pub type MoveList = SmallVec<[Move; 128]>;
+pub type MoveList = Vec<Move>;
 
 // World border for infinite chess. These are initialized to a very large box,
 // but can be overridden from JS via the playableRegion values.
