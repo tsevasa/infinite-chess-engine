@@ -246,15 +246,17 @@ pub fn compute_cloud_center(board: &Board) -> Option<Coordinate> {
     let mut sum_y: i64 = 0;
     let mut count: i64 = 0;
 
-    for ((x, y), piece) in board.iter() {
-        if piece.piece_type() != PieceType::Void
-            && piece.piece_type() != PieceType::Obstacle
-            && piece.piece_type() != PieceType::Pawn
-        {
-            sum_x += *x;
-            sum_y += *y;
-            count += 1;
+    // BITBOARD: O(1) per tile summation using bitwise helpers
+    for (cx, cy, tile) in board.tiles.iter() {
+        let bits = tile.occ_all & !tile.occ_void & !tile.occ_pawns;
+        if bits == 0 {
+            continue;
         }
+
+        let n = bits.count_ones() as i64;
+        sum_x += n * cx * 8 + tile.sum_lx(bits) as i64;
+        sum_y += n * cy * 8 + tile.sum_ly(bits) as i64;
+        count += n;
     }
 
     if count > 0 {
@@ -274,55 +276,56 @@ pub fn compute_cloud_center(board: &Board) -> Option<Coordinate> {
 pub fn evaluate_lazy(game: &GameState) -> i32 {
     let mut score = game.material_score;
 
-    for ((x, y), piece) in game.board.iter() {
-        let mut positional_bonus = 0;
+    // BITBOARD: Use tile-based CTZ iteration for O(popcount) positional scoring
+    for (cx, cy, tile) in game.board.tiles.iter() {
+        let mut bits = tile.occ_all;
+        while bits != 0 {
+            let idx = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
 
-        match piece.piece_type() {
-            PieceType::Pawn => {
-                // Determine direction based on color
-                let rank = *y;
-                let promotion_rank = if piece.color() == PlayerColor::White {
-                    game.white_promo_rank
-                } else {
-                    game.black_promo_rank
-                };
+            let packed = tile.piece[idx];
+            if packed == 0 {
+                continue;
+            }
+            let piece = crate::board::Piece::from_packed(packed);
 
-                // Advancement bonus
-                let distance_to_promo = (promotion_rank - rank).abs();
-                if distance_to_promo < 6 {
-                    positional_bonus += (6 - distance_to_promo) as i32 * 5;
+            let mut positional_bonus = 0;
+            let x = cx * 8 + (idx % 8) as i64;
+            let y = cy * 8 + (idx / 8) as i64;
+
+            match piece.piece_type() {
+                PieceType::Pawn => {
+                    let rank = y;
+                    let promotion_rank = if piece.color() == PlayerColor::White {
+                        game.white_promo_rank
+                    } else {
+                        game.black_promo_rank
+                    };
+                    let distance_to_promo = (promotion_rank - rank).abs();
+                    if distance_to_promo < 6 {
+                        positional_bonus += (6 - distance_to_promo) as i32 * 5;
+                    }
+                    if x >= 2 && x <= 5 {
+                        positional_bonus += 5;
+                    }
                 }
-
-                // Centralization
-                if *x >= 2 && *x <= 5 {
-                    positional_bonus += 5;
+                PieceType::Knight | PieceType::Bishop => {
+                    if x >= 2 && x <= 5 && y >= 2 && y <= 5 {
+                        positional_bonus += 10;
+                    }
+                }
+                _ => {
+                    if x >= 2 && x <= 5 && y >= 2 && y <= 5 {
+                        positional_bonus += 2;
+                    }
                 }
             }
-            PieceType::Knight => {
-                // Centralization
-                if *x >= 2 && *x <= 5 && *y >= 2 && *y <= 5 {
-                    positional_bonus += 10;
-                }
-            }
-            PieceType::Bishop => {
-                // Centralization
-                if *x >= 2 && *x <= 5 && *y >= 2 && *y <= 5 {
-                    positional_bonus += 5;
-                }
-            }
-            // Knights, Bishops, Rooks, Queens: Simple centralization/activity proxy
-            _ => {
-                // Very basic centrality
-                if *x >= 2 && *x <= 5 && *y >= 2 && *y <= 5 {
-                    positional_bonus += 2;
-                }
-            }
-        }
 
-        if piece.color() == PlayerColor::White {
-            score += positional_bonus;
-        } else {
-            score -= positional_bonus;
+            if piece.color() == PlayerColor::White {
+                score += positional_bonus;
+            } else {
+                score -= positional_bonus;
+            }
         }
     }
 
@@ -407,25 +410,6 @@ fn evaluate_inner(game: &GameState) -> i32 {
 
 // ==================== Piece Evaluation ====================
 
-/// Count undeveloped minor pieces (knights/bishops) for a color
-fn count_undeveloped_minors(game: &GameState, color: PlayerColor) -> i32 {
-    let mut count = 0;
-    for ((x, y), piece) in game.board.iter() {
-        if piece.color() != color {
-            continue;
-        }
-        match piece.piece_type() {
-            PieceType::Knight | PieceType::Bishop => {
-                if game.starting_squares.contains(&Coordinate::new(*x, *y)) {
-                    count += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    count
-}
-
 pub fn evaluate_pieces(
     game: &GameState,
     white_king: &Option<Coordinate>,
@@ -433,20 +417,87 @@ pub fn evaluate_pieces(
 ) -> i32 {
     let mut score: i32 = 0;
 
-    // let white_back_rank = game.white_back_rank;
-    // let black_back_rank = game.black_back_rank;
     let white_promo_rank = game.white_promo_rank;
     let black_promo_rank = game.black_promo_rank;
 
-    // Calculate GAME PHASE based on piece count (not pawns)
-    // 100 = opening (full pieces), 0 = pure endgame
     let game_phase = calculate_game_phase(game);
-    let is_opening = game_phase >= MIDDLEGAME_PIECE_THRESHOLD; // >= 70%
-    let is_endgame = game_phase < ENDGAME_PIECE_THRESHOLD; // < 30%
+    let is_opening = game_phase >= MIDDLEGAME_PIECE_THRESHOLD;
+    let is_endgame = game_phase < ENDGAME_PIECE_THRESHOLD;
 
-    // Determine development status for attack scaling
-    let white_undeveloped = count_undeveloped_minors(game, PlayerColor::White);
-    let black_undeveloped = count_undeveloped_minors(game, PlayerColor::Black);
+    // BITBOARD: Pass 1 - Single metadata collection
+    let mut white_undeveloped = 0;
+    let mut black_undeveloped = 0;
+    let mut white_bishops = 0;
+    let mut black_bishops = 0;
+    let mut white_bishop_colors: (bool, bool) = (false, false);
+    let mut black_bishop_colors: (bool, bool) = (false, false);
+    let mut cloud_sum_x: i64 = 0;
+    let mut cloud_sum_y: i64 = 0;
+    let mut cloud_count: i64 = 0;
+
+    for (cx, cy, tile) in game.board.tiles.iter() {
+        let cloud_bits = tile.occ_all & !tile.occ_void & !tile.occ_pawns;
+        if cloud_bits != 0 {
+            let n = cloud_bits.count_ones() as i64;
+            cloud_sum_x += n * cx * 8 + tile.sum_lx(cloud_bits) as i64;
+            cloud_sum_y += n * cy * 8 + tile.sum_ly(cloud_bits) as i64;
+            cloud_count += n;
+        }
+
+        let w_minors = tile.occ_white & (tile.occ_knights | tile.occ_bishops);
+        if w_minors != 0 {
+            let mut bits = w_minors;
+            while bits != 0 {
+                let idx = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let x = cx * 8 + (idx % 8) as i64;
+                let y = cy * 8 + (idx / 8) as i64;
+                if game.starting_squares.contains(&Coordinate::new(x, y)) {
+                    white_undeveloped += 1;
+                }
+                if ((1 << idx) & tile.occ_bishops) != 0 {
+                    white_bishops += 1;
+                    if (x + y) % 2 == 0 {
+                        white_bishop_colors.0 = true;
+                    } else {
+                        white_bishop_colors.1 = true;
+                    }
+                }
+            }
+        }
+
+        let b_minors = tile.occ_black & (tile.occ_knights | tile.occ_bishops);
+        if b_minors != 0 {
+            let mut bits = b_minors;
+            while bits != 0 {
+                let idx = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let x = cx * 8 + (idx % 8) as i64;
+                let y = cy * 8 + (idx / 8) as i64;
+                if game.starting_squares.contains(&Coordinate::new(x, y)) {
+                    black_undeveloped += 1;
+                }
+                if ((1 << idx) & tile.occ_bishops) != 0 {
+                    black_bishops += 1;
+                    if (x + y) % 2 == 0 {
+                        black_bishop_colors.0 = true;
+                    } else {
+                        black_bishop_colors.1 = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let cloud_center = if cloud_count > 0 {
+        Some(Coordinate {
+            x: cloud_sum_x / cloud_count,
+            y: cloud_sum_y / cloud_count,
+        })
+    } else {
+        None
+    };
+
     let white_attack_scale = if white_undeveloped >= UNDEVELOPED_MINORS_THRESHOLD {
         DEVELOPMENT_PHASE_ATTACK_SCALE
     } else {
@@ -458,303 +509,238 @@ pub fn evaluate_pieces(
         DEVELOPED_PHASE_ATTACK_SCALE
     };
 
-    let mut white_bishops = 0;
-    let mut black_bishops = 0;
-    let mut white_bishop_colors: (bool, bool) = (false, false); // (light, dark)
-    let mut black_bishop_colors: (bool, bool) = (false, false);
+    // BITBOARD: Pass 2 - Main evaluation
+    for (cx, cy, tile) in game.board.tiles.iter() {
+        let mut bits = tile.occ_all;
+        while bits != 0 {
+            let idx = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
 
-    let cloud_center: Option<Coordinate> = compute_cloud_center(&game.board);
-    for ((x, y), piece) in game.board.iter() {
-        let mut piece_score = match piece.piece_type() {
-            PieceType::Rook => evaluate_rook(game, *x, *y, piece.color(), white_king, black_king),
-            PieceType::Queen => evaluate_queen(game, *x, *y, piece.color(), white_king, black_king),
-            PieceType::Knight => evaluate_knight(*x, *y, piece.color(), black_king, white_king),
-            PieceType::Bishop => {
-                if piece.color() == PlayerColor::White {
-                    white_bishops += 1;
-                    if (*x + *y) % 2 == 0 {
-                        white_bishop_colors.0 = true;
+            let packed = tile.piece[idx];
+            if packed == 0 {
+                continue;
+            }
+            let piece = crate::board::Piece::from_packed(packed);
+            let x = cx * 8 + (idx % 8) as i64;
+            let y = cy * 8 + (idx / 8) as i64;
+
+            let mut piece_score = match piece.piece_type() {
+                PieceType::Rook => evaluate_rook(game, x, y, piece.color(), white_king, black_king),
+                PieceType::Queen => {
+                    evaluate_queen(game, x, y, piece.color(), white_king, black_king)
+                }
+                PieceType::Knight => evaluate_knight(x, y, piece.color(), black_king, white_king),
+                PieceType::Bishop => {
+                    evaluate_bishop(game, x, y, piece.color(), white_king, black_king)
+                }
+                PieceType::Pawn => {
+                    let pawn_eval = evaluate_pawn_position(
+                        x,
+                        y,
+                        piece.color(),
+                        white_promo_rank,
+                        black_promo_rank,
+                    );
+                    if is_opening {
+                        if x >= 3 && x <= 6 { 5 } else { 0 }
+                    } else if is_endgame {
+                        pawn_eval
                     } else {
-                        white_bishop_colors.1 = true;
+                        let scale = 100
+                            - ((game_phase - ENDGAME_PIECE_THRESHOLD) * 100
+                                / (MIDDLEGAME_PIECE_THRESHOLD - ENDGAME_PIECE_THRESHOLD));
+                        pawn_eval * scale / 100
                     }
-                } else {
-                    black_bishops += 1;
-                    if (*x + *y) % 2 == 0 {
-                        black_bishop_colors.0 = true;
+                }
+                PieceType::Chancellor => {
+                    let rook_eval =
+                        evaluate_rook(game, x, y, piece.color(), white_king, black_king);
+                    let ek = if piece.color() == PlayerColor::White {
+                        black_king
                     } else {
-                        black_bishop_colors.1 = true;
+                        white_king
+                    };
+                    let mut b = 0;
+                    if let Some(k) = ek {
+                        let d = (x - k.x).abs() + (y - k.y).abs();
+                        if d <= 4 {
+                            b = 15;
+                        } else if d <= 8 {
+                            b = 8;
+                        }
                     }
+                    (rook_eval * CHANCELLOR_ROOK_SCALE / 100) + b
                 }
-                evaluate_bishop(game, *x, *y, piece.color(), white_king, black_king)
-            }
-            PieceType::Pawn => {
-                // Phase-based pawn evaluation:
-                // Opening: NO advancement bonus, only central pawn preference
-                // Middlegame: Partial advancement bonus
-                // Endgame: Full pawn evaluation
-                let pawn_eval = evaluate_pawn_position(
-                    *x,
-                    *y,
-                    piece.color(),
-                    white_promo_rank,
-                    black_promo_rank,
-                );
-
-                if is_opening {
-                    // In opening: only value central pawns, no advancement bonus
-                    // The central pawn bonus is applied in evaluate_pawn_position
-                    // Just check if pawn is central
-                    if *x >= 3 && *x <= 6 {
-                        5 // Small bonus for central pawns only
+                PieceType::Archbishop => {
+                    let bishop_eval =
+                        evaluate_bishop(game, x, y, piece.color(), white_king, black_king);
+                    let ek = if piece.color() == PlayerColor::White {
+                        black_king
                     } else {
-                        0 // Side pawns get NO value in opening
+                        white_king
+                    };
+                    let mut b = 0;
+                    if let Some(k) = ek {
+                        let d = (x - k.x).abs() + (y - k.y).abs();
+                        if d <= 4 {
+                            b = 15;
+                        } else if d <= 8 {
+                            b = 8;
+                        }
                     }
-                } else if is_endgame {
-                    pawn_eval // Full pawn value in endgame
-                } else {
-                    // Middlegame: scale pawn eval by phase
-                    // phase 70 -> 0%, phase 30 -> 100%
-                    let scale = 100
-                        - ((game_phase - ENDGAME_PIECE_THRESHOLD) * 100
-                            / (MIDDLEGAME_PIECE_THRESHOLD - ENDGAME_PIECE_THRESHOLD));
-                    pawn_eval * scale / 100
+                    (bishop_eval * ARCHBISHOP_BISHOP_SCALE / 100) + b
                 }
-            }
-
-            // ===== Fairy Pieces =====
-
-            // Chancellor (R+N): High-value attacking piece
-            // Uses rook eval for slider attacks, plus bonus for being near enemy king
-            // Does NOT get knight defensive bonus - should be attacking!
-            PieceType::Chancellor => {
-                let rook_eval = evaluate_rook(game, *x, *y, piece.color(), white_king, black_king);
-                // Only enemy king tropism, no defensive bonus
-                let enemy_king = if piece.color() == PlayerColor::White {
-                    black_king
-                } else {
-                    white_king
-                };
-                let mut attack_bonus = 0;
-                if let Some(ek) = enemy_king {
-                    let dist = (*x - ek.x).abs() + (*y - ek.y).abs();
-                    if dist <= 4 {
-                        attack_bonus = 15; // Near enemy king = fork potential
-                    } else if dist <= 8 {
-                        attack_bonus = 8;
+                PieceType::Amazon => {
+                    let queen_eval =
+                        evaluate_queen(game, x, y, piece.color(), white_king, black_king);
+                    let rook_eval =
+                        evaluate_rook(game, x, y, piece.color(), white_king, black_king);
+                    let ek = if piece.color() == PlayerColor::White {
+                        black_king
+                    } else {
+                        white_king
+                    };
+                    let mut b = 0;
+                    if let Some(k) = ek {
+                        let d = (x - k.x).abs() + (y - k.y).abs();
+                        if d <= 4 {
+                            b = 20;
+                        } else if d <= 8 {
+                            b = 10;
+                        }
                     }
+                    (queen_eval * AMAZON_QUEEN_SCALE / 100)
+                        + (rook_eval * AMAZON_ROOK_SCALE / 100)
+                        + b
                 }
-                (rook_eval * CHANCELLOR_ROOK_SCALE / 100) + attack_bonus
-            }
-
-            // Archbishop (B+N): High-value attacking piece
-            // Uses bishop eval for slider attacks, plus bonus for being near enemy king
-            PieceType::Archbishop => {
-                let bishop_eval =
-                    evaluate_bishop(game, *x, *y, piece.color(), white_king, black_king);
-                let enemy_king = if piece.color() == PlayerColor::White {
-                    black_king
-                } else {
-                    white_king
-                };
-                let mut attack_bonus = 0;
-                if let Some(ek) = enemy_king {
-                    let dist = (*x - ek.x).abs() + (*y - ek.y).abs();
-                    if dist <= 4 {
-                        attack_bonus = 15;
-                    } else if dist <= 8 {
-                        attack_bonus = 8;
-                    }
+                PieceType::RoyalQueen => {
+                    evaluate_queen(game, x, y, piece.color(), white_king, black_king)
                 }
-                (bishop_eval * ARCHBISHOP_BISHOP_SCALE / 100) + attack_bonus
-            }
-
-            // Amazon (Q+N): Highest value attacking piece
-            // Only attacking bonuses, no defensive knight logic
-            PieceType::Amazon => {
-                let queen_eval =
-                    evaluate_queen(game, *x, *y, piece.color(), white_king, black_king);
-                let rook_eval = evaluate_rook(game, *x, *y, piece.color(), white_king, black_king);
-                // Extra bonus for being near enemy king (massive fork potential)
-                let enemy_king = if piece.color() == PlayerColor::White {
-                    black_king
-                } else {
-                    white_king
-                };
-                let mut attack_bonus = 0;
-                if let Some(ek) = enemy_king {
-                    let dist = (*x - ek.x).abs() + (*y - ek.y).abs();
-                    if dist <= 4 {
-                        attack_bonus = 20;
-                    } else if dist <= 8 {
-                        attack_bonus = 10;
-                    }
+                PieceType::Knightrider => {
+                    evaluate_knightrider(x, y, piece.color(), white_king, black_king, &game.board)
                 }
-                (queen_eval * AMAZON_QUEEN_SCALE / 100)
-                    + (rook_eval * AMAZON_ROOK_SCALE / 100)
-                    + attack_bonus
-            }
-
-            // RoyalQueen: Same as queen
-            PieceType::RoyalQueen => {
-                evaluate_queen(game, *x, *y, piece.color(), white_king, black_king)
-            }
-
-            // Knightrider: Knight-ray mobility
-            PieceType::Knightrider => {
-                evaluate_knightrider(*x, *y, piece.color(), white_king, black_king, &game.board)
-            }
-
-            // Leapers (Hawk, Rose, Camel, Giraffe, Zebra, Centaur): Tropism-based positioning
-            PieceType::Hawk
-            | PieceType::Rose
-            | PieceType::Camel
-            | PieceType::Giraffe
-            | PieceType::Zebra => evaluate_leaper_positioning(
-                *x,
-                *y,
-                piece.color(),
-                white_king,
-                black_king,
-                cloud_center.as_ref(),
-                get_piece_value(piece.piece_type()),
-            ),
-
-            // Centaur / RoyalCentaur: Knight + Guard components
-            PieceType::Centaur | PieceType::RoyalCentaur => {
-                let knight_eval = evaluate_knight(*x, *y, piece.color(), black_king, white_king);
-                let leaper_eval = evaluate_leaper_positioning(
-                    *x,
-                    *y,
+                PieceType::Hawk
+                | PieceType::Rose
+                | PieceType::Camel
+                | PieceType::Giraffe
+                | PieceType::Zebra => evaluate_leaper_positioning(
+                    x,
+                    y,
                     piece.color(),
                     white_king,
                     black_king,
                     cloud_center.as_ref(),
                     get_piece_value(piece.piece_type()),
-                );
-                (knight_eval * CENTAUR_KNIGHT_SCALE / 100)
-                    + (leaper_eval * CENTAUR_GUARD_SCALE / 100)
-            }
-
-            // Huygen: Prime-distance slider, use tropism
-            PieceType::Huygen => evaluate_leaper_positioning(
-                *x,
-                *y,
-                piece.color(),
-                white_king,
-                black_king,
-                cloud_center.as_ref(),
-                get_piece_value(PieceType::Huygen),
-            ),
-
-            // Guard: King-like, positional
-            PieceType::Guard => evaluate_leaper_positioning(
-                *x,
-                *y,
-                piece.color(),
-                white_king,
-                black_king,
-                cloud_center.as_ref(),
-                get_piece_value(PieceType::Guard),
-            ),
-
-            _ => 0,
-        };
-
-        // Cloud penalty: pieces too far from piece centroid
-        // Scale by piece value - high value pieces far from action are worse
-        if let Some(center) = &cloud_center {
-            let cheb = (*x - center.x).abs().max((*y - center.y).abs());
-
-            if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
-                if cheb > PIECE_CLOUD_CHEB_RADIUS {
-                    // Far from action - penalty scaled by piece value
-                    let piece_val = get_piece_value(piece.piece_type());
-                    let value_factor = (piece_val / 100).max(1);
-                    let excess =
-                        (cheb - PIECE_CLOUD_CHEB_RADIUS).min(PIECE_CLOUD_CHEB_MAX_EXCESS) as i32;
-                    let penalty = excess * CLOUD_PENALTY_PER_100_VALUE * value_factor;
-                    piece_score -= penalty;
+                ),
+                PieceType::Centaur | PieceType::RoyalCentaur => {
+                    let knight_eval = evaluate_knight(x, y, piece.color(), black_king, white_king);
+                    let leaper_eval = evaluate_leaper_positioning(
+                        x,
+                        y,
+                        piece.color(),
+                        white_king,
+                        black_king,
+                        cloud_center.as_ref(),
+                        get_piece_value(piece.piece_type()),
+                    );
+                    (knight_eval * CENTAUR_KNIGHT_SCALE / 100)
+                        + (leaper_eval * CENTAUR_GUARD_SCALE / 100)
                 }
-            }
-        }
+                PieceType::Huygen => evaluate_leaper_positioning(
+                    x,
+                    y,
+                    piece.color(),
+                    white_king,
+                    black_king,
+                    cloud_center.as_ref(),
+                    get_piece_value(PieceType::Huygen),
+                ),
+                PieceType::Guard => evaluate_leaper_positioning(
+                    x,
+                    y,
+                    piece.color(),
+                    white_king,
+                    black_king,
+                    cloud_center.as_ref(),
+                    get_piece_value(PieceType::Guard),
+                ),
+                _ => 0,
+            };
 
-        // Starting square penalty: encourage developing minors early
-        // Rooks and queens are exempt - they develop later (rooks via castling, queens after minors)
-        if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
-            if game.starting_squares.contains(&Coordinate::new(*x, *y)) {
-                // Only minors should be penalized for not developing
-                let penalty = match piece.piece_type() {
-                    PieceType::Knight | PieceType::Bishop => MIN_DEVELOPMENT_PENALTY + 3,
-                    // Rooks develop via castling or when files open - no starting square penalty
-                    PieceType::Rook | PieceType::Queen => 0,
-                    // Fairy pieces with knight or bishop component should develop
-                    PieceType::Archbishop => MIN_DEVELOPMENT_PENALTY,
-                    // Others exempt (they're handled by cloud penalty if too far)
-                    _ => 0,
-                };
-                piece_score -= penalty;
-            }
-        }
-
-        // King defender logic: low-value pieces near own king = good, high-value = bad
-        let own_king = if piece.color() == PlayerColor::White {
-            &white_king
-        } else {
-            &black_king
-        };
-        if let Some(ok) = own_king {
-            if !piece.piece_type().is_royal() && piece.piece_type() != PieceType::Pawn {
-                let dist = (*x - ok.x).abs().max((*y - ok.y).abs()); // Chebyshev distance
-                let piece_val = get_piece_value(piece.piece_type());
-
-                if dist <= 3 {
-                    // Near own king
-                    if piece_val < KING_DEFENDER_VALUE_THRESHOLD {
-                        // Low-value piece = defensive, good
-                        piece_score += KING_DEFENDER_BONUS;
-                    } else {
-                        // High-value piece = should be attacking, not babysitting
-                        piece_score -= KING_ATTACKER_NEAR_OWN_KING_PENALTY;
+            if let Some(center) = &cloud_center {
+                let cheb = (x - center.x).abs().max((y - center.y).abs());
+                if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
+                    if cheb > PIECE_CLOUD_CHEB_RADIUS {
+                        let piece_val = get_piece_value(piece.piece_type());
+                        let value_factor = (piece_val / 100).max(1);
+                        let excess = (cheb - PIECE_CLOUD_CHEB_RADIUS)
+                            .min(PIECE_CLOUD_CHEB_MAX_EXCESS)
+                            as i32;
+                        piece_score -= excess * CLOUD_PENALTY_PER_100_VALUE * value_factor;
                     }
                 }
             }
-        }
 
-        // Scale attack-focused pieces based on development phase
-        // When undeveloped, reduce attack bonuses to prioritize getting pieces into the game
-        let is_attacking_piece = matches!(
-            piece.piece_type(),
-            PieceType::Rook
-                | PieceType::Queen
-                | PieceType::RoyalQueen
-                | PieceType::Bishop
-                | PieceType::Chancellor
-                | PieceType::Archbishop
-                | PieceType::Amazon
-        );
-        if is_attacking_piece && piece_score > 0 {
-            // Only scale positive eval - we still want penalties to apply fully
-            let attack_scale = if piece.color() == PlayerColor::White {
-                white_attack_scale
+            if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
+                if game.starting_squares.contains(&Coordinate::new(x, y)) {
+                    piece_score -= match piece.piece_type() {
+                        PieceType::Knight | PieceType::Bishop => MIN_DEVELOPMENT_PENALTY + 3,
+                        PieceType::Archbishop => MIN_DEVELOPMENT_PENALTY,
+                        _ => 0,
+                    };
+                }
+            }
+
+            let own_king = if piece.color() == PlayerColor::White {
+                &white_king
             } else {
-                black_attack_scale
+                &black_king
             };
-            piece_score = piece_score * attack_scale / 100;
-        }
+            if let Some(ok) = own_king {
+                if !piece.piece_type().is_royal() && piece.piece_type() != PieceType::Pawn {
+                    let dist = (x - ok.x).abs().max((y - ok.y).abs());
+                    if dist <= 3 {
+                        if get_piece_value(piece.piece_type()) < KING_DEFENDER_VALUE_THRESHOLD {
+                            piece_score += KING_DEFENDER_BONUS;
+                        } else {
+                            piece_score -= KING_ATTACKER_NEAR_OWN_KING_PENALTY;
+                        }
+                    }
+                }
+            }
 
-        if piece.color() == PlayerColor::White {
-            score += piece_score;
-        } else {
-            score -= piece_score;
+            let is_attacking_piece = matches!(
+                piece.piece_type(),
+                PieceType::Rook
+                    | PieceType::Queen
+                    | PieceType::RoyalQueen
+                    | PieceType::Bishop
+                    | PieceType::Chancellor
+                    | PieceType::Archbishop
+                    | PieceType::Amazon
+            );
+            if is_attacking_piece && piece_score > 0 {
+                let attack_scale = if piece.color() == PlayerColor::White {
+                    white_attack_scale
+                } else {
+                    black_attack_scale
+                };
+                piece_score = piece_score * attack_scale / 100;
+            }
+
+            if piece.color() == PlayerColor::White {
+                score += piece_score;
+            } else {
+                score -= piece_score;
+            }
         }
     }
 
-    // Bishop pair bonus - even stronger if opposite colors
     if white_bishops >= 2 {
         score += BISHOP_PAIR_BONUS;
         bump_feat!(bishop_pair_bonus, 1);
         if white_bishop_colors.0 && white_bishop_colors.1 {
-            score += 20; // Extra bonus for opposite colored bishops
+            score += 20;
         }
     }
     if black_bishops >= 2 {
@@ -1420,39 +1406,48 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
 
     // 3. Enemy sliders attacking king zone
     let mut enemy_slider_threats = 0;
-    for ((x, y), piece) in game.board.iter() {
-        if piece.color() == color {
+    for (cx, cy, tile) in game.board.tiles.iter() {
+        let occ = if color == PlayerColor::White {
+            tile.occ_black
+        } else {
+            tile.occ_white
+        };
+        let sliders = occ & (tile.occ_ortho_sliders | tile.occ_diag_sliders);
+        if sliders == 0 {
             continue;
         }
 
-        match piece.piece_type() {
-            PieceType::Rook | PieceType::Bishop | PieceType::Queen | PieceType::Amazon => {
-                // First check: is the slider even roughly in line with the king?
-                let dx = x - king.x;
-                let dy = y - king.y;
+        let mut bits = sliders;
+        while bits != 0 {
+            let idx = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
 
-                let same_file = dx == 0;
-                let same_rank = dy == 0;
-                let same_diag = dx.abs() == dy.abs();
+            let x = cx * 8 + (idx % 8) as i64;
+            let y = cy * 8 + (idx / 8) as i64;
 
-                if !(same_file || same_rank || same_diag) {
-                    continue;
-                }
+            // First check: is the slider even roughly in line with the king?
+            let dx = x - king.x;
+            let dy = y - king.y;
 
-                // In infinite chess, ignore ridiculously far sliders for safety.
-                // King safety is local; cap at some reasonable radius (e.g. 32).
-                let chebyshev = dx.abs().max(dy.abs());
-                if chebyshev > 32 {
-                    continue;
-                }
+            let same_file = dx == 0;
+            let same_rank = dy == 0;
+            let same_diag = dx.abs() == dy.abs();
 
-                // Now use the O(#pieces) line-of-sight check instead of stepping square-by-square.
-                let from = Coordinate { x: *x, y: *y };
-                if is_clear_line_between(&game.board, &from, king) {
-                    enemy_slider_threats += 1;
-                }
+            if !(same_file || same_rank || same_diag) {
+                continue;
             }
-            _ => {}
+
+            // In infinite chess, ignore ridiculously far sliders for safety.
+            let chebyshev = dx.abs().max(dy.abs());
+            if chebyshev > 32 {
+                continue;
+            }
+
+            // Now use the O(#pieces) line-of-sight check
+            let from = Coordinate { x, y };
+            if is_clear_line_between(&game.board, &from, king) {
+                enemy_slider_threats += 1;
+            }
         }
     }
     safety -= enemy_slider_threats * KING_ENEMY_SLIDER_PENALTY;
@@ -1494,19 +1489,66 @@ fn compute_pawn_structure(game: &GameState) -> i32 {
     let mut score: i32 = 0;
 
     // Track pawns per file for each color
-    let mut white_pawn_files: Vec<i64> = Vec::new();
+    let mut white_pawn_files: Vec<i64> = Vec::new(); // For inter-tile doubled pawn check
     let mut black_pawn_files: Vec<i64> = Vec::new();
     let mut white_pawns: Vec<(i64, i64)> = Vec::new();
     let mut black_pawns: Vec<(i64, i64)> = Vec::new();
 
-    for ((x, y), piece) in game.board.iter() {
-        if piece.piece_type() == PieceType::Pawn {
-            if piece.color() == PlayerColor::White {
-                white_pawn_files.push(*x);
-                white_pawns.push((*x, *y));
-            } else {
-                black_pawn_files.push(*x);
-                black_pawns.push((*x, *y));
+    // Column masks for bitwise doubled pawn check
+    const COL_MASKS: [u64; 8] = [
+        0x0101010101010101,
+        0x0202020202020202,
+        0x0404040404040404,
+        0x0808080808080808,
+        0x1010101010101010,
+        0x2020202020202020,
+        0x4040404040404040,
+        0x8080808080808080,
+    ];
+
+    // BITBOARD: Use per-tile occ_pawns for faster collection and intra-tile doubled checks
+    for (cx, cy, tile) in game.board.tiles.iter() {
+        let w_pawns = tile.occ_pawns & tile.occ_white;
+        let b_pawns = tile.occ_pawns & tile.occ_black;
+
+        if w_pawns != 0 {
+            // Intra-tile doubled pawn check
+            for mask in COL_MASKS {
+                let count = (w_pawns & mask).count_ones();
+                if count > 1 {
+                    score -= (count - 1) as i32 * DOUBLED_PAWN_PENALTY;
+                }
+                if count > 0 {
+                    white_pawn_files.push(cx * 8 + (mask.trailing_zeros() % 8) as i64);
+                }
+            }
+
+            // Collect for passed pawn check
+            let mut bits = w_pawns;
+            while bits != 0 {
+                let idx = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                white_pawns.push((cx * 8 + (idx % 8) as i64, cy * 8 + (idx / 8) as i64));
+            }
+        }
+
+        if b_pawns != 0 {
+            // Same for black
+            for mask in COL_MASKS {
+                let count = (b_pawns & mask).count_ones();
+                if count > 1 {
+                    score += (count - 1) as i32 * DOUBLED_PAWN_PENALTY;
+                }
+                if count > 0 {
+                    black_pawn_files.push(cx * 8 + (mask.trailing_zeros() % 8) as i64);
+                }
+            }
+
+            let mut bits = b_pawns;
+            while bits != 0 {
+                let idx = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                black_pawns.push((cx * 8 + (idx % 8) as i64, cy * 8 + (idx / 8) as i64));
             }
         }
     }

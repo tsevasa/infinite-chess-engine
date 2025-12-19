@@ -276,6 +276,50 @@ impl Tile {
         self.occ_ortho_sliders = 0;
         self.piece = [0; 64];
     }
+
+    /// Bitwise sum of local X coordinates (0..7) for all set bits.
+    /// Used for centroid calculation without CTZ loops.
+    #[inline]
+    pub fn sum_lx(&self, bits: u64) -> u32 {
+        const COL_1: u64 = 0x0202020202020202;
+        const COL_2: u64 = 0x0404040404040404;
+        const COL_3: u64 = 0x0808080808080808;
+        const COL_4: u64 = 0x1010101010101010;
+        const COL_5: u64 = 0x2020202020202020;
+        const COL_6: u64 = 0x4040404040404040;
+        const COL_7: u64 = 0x8080808080808080;
+
+        let mut sum = (bits & COL_1).count_ones();
+        sum += (bits & COL_2).count_ones() * 2;
+        sum += (bits & COL_3).count_ones() * 3;
+        sum += (bits & COL_4).count_ones() * 4;
+        sum += (bits & COL_5).count_ones() * 5;
+        sum += (bits & COL_6).count_ones() * 6;
+        sum += (bits & COL_7).count_ones() * 7;
+        sum
+    }
+
+    /// Bitwise sum of local Y coordinates (0..7) for all set bits.
+    /// Used for centroid calculation without CTZ loops.
+    #[inline]
+    pub fn sum_ly(&self, bits: u64) -> u32 {
+        const ROW_1: u64 = 0x000000000000FF00;
+        const ROW_2: u64 = 0x0000000000FF0000;
+        const ROW_3: u64 = 0x00000000FF000000;
+        const ROW_4: u64 = 0x000000FF00000000;
+        const ROW_5: u64 = 0x0000FF0000000000;
+        const ROW_6: u64 = 0x00FF000000000000;
+        const ROW_7: u64 = 0xFF00000000000000;
+
+        let mut sum = (bits & ROW_1).count_ones();
+        sum += (bits & ROW_2).count_ones() * 2;
+        sum += (bits & ROW_3).count_ones() * 3;
+        sum += (bits & ROW_4).count_ones() * 4;
+        sum += (bits & ROW_5).count_ones() * 5;
+        sum += (bits & ROW_6).count_ones() * 6;
+        sum += (bits & ROW_7).count_ones() * 7;
+        sum
+    }
 }
 
 // ============================================================================
@@ -320,6 +364,8 @@ impl Default for Bucket {
 pub struct TileTable {
     buckets: Box<[Bucket; TILE_TABLE_CAPACITY]>,
     count: usize,
+    /// BITBOARD: Bitmask of occupied buckets (512 bits = 8 * u64)
+    occ_mask: [u64; 8],
 }
 
 impl Clone for TileTable {
@@ -327,6 +373,7 @@ impl Clone for TileTable {
         TileTable {
             buckets: self.buckets.clone(),
             count: self.count,
+            occ_mask: self.occ_mask,
         }
     }
 }
@@ -345,7 +392,11 @@ impl TileTable {
             .into_boxed_slice()
             .try_into()
             .unwrap();
-        TileTable { buckets, count: 0 }
+        TileTable {
+            buckets,
+            count: 0,
+            occ_mask: [0; 8],
+        }
     }
 
     /// Hash tile coordinates to bucket index.
@@ -402,39 +453,29 @@ impl TileTable {
     /// Get or create a tile at the given coordinates.
     #[inline]
     pub fn get_or_create(&mut self, cx: i64, cy: i64) -> &mut Tile {
-        let start_idx = Self::hash(cx, cy);
-        let mut idx = start_idx;
-        let mut tombstone_idx: Option<usize> = None;
+        let mut idx = Self::hash(cx, cy);
 
-        for _ in 0..TILE_TABLE_CAPACITY {
-            let bucket = &self.buckets[idx];
-            match bucket.state {
-                BucketState::Empty => {
-                    // Use tombstone if we found one, otherwise use empty slot
-                    let insert_idx = tombstone_idx.unwrap_or(idx);
-                    self.buckets[insert_idx].cx = cx;
-                    self.buckets[insert_idx].cy = cy;
-                    self.buckets[insert_idx].state = BucketState::Occupied;
-                    self.buckets[insert_idx].tile.clear();
+        loop {
+            match self.buckets[idx].state {
+                BucketState::Empty | BucketState::Tombstone => {
+                    self.buckets[idx] = Bucket {
+                        cx,
+                        cy,
+                        state: BucketState::Occupied,
+                        tile: Tile::new(),
+                    };
                     self.count += 1;
-                    return &mut self.buckets[insert_idx].tile;
+                    self.occ_mask[idx / 64] |= 1u64 << (idx % 64);
+                    return &mut self.buckets[idx].tile;
                 }
                 BucketState::Occupied => {
-                    if bucket.cx == cx && bucket.cy == cy {
+                    if self.buckets[idx].cx == cx && self.buckets[idx].cy == cy {
                         return &mut self.buckets[idx].tile;
-                    }
-                }
-                BucketState::Tombstone => {
-                    if tombstone_idx.is_none() {
-                        tombstone_idx = Some(idx);
                     }
                 }
             }
             idx = (idx + 1) & TILE_TABLE_MASK;
         }
-
-        // Table is full - this shouldn't happen with proper sizing
-        panic!("TileTable is full! Increase TILE_TABLE_CAPACITY");
     }
 
     /// Remove a tile at the given coordinates (marks as tombstone).
@@ -442,21 +483,26 @@ impl TileTable {
     #[inline]
     pub fn remove(&mut self, cx: i64, cy: i64) {
         let mut idx = Self::hash(cx, cy);
-        for _ in 0..TILE_TABLE_CAPACITY {
-            let bucket = &self.buckets[idx];
-            match bucket.state {
-                BucketState::Empty => return,
+        let start_idx = idx;
+
+        loop {
+            match self.buckets[idx].state {
                 BucketState::Occupied => {
-                    if bucket.cx == cx && bucket.cy == cy {
+                    if self.buckets[idx].cx == cx && self.buckets[idx].cy == cy {
                         self.buckets[idx].state = BucketState::Tombstone;
                         self.buckets[idx].tile.clear();
-                        self.count = self.count.saturating_sub(1);
+                        self.count -= 1;
+                        self.occ_mask[idx / 64] &= !(1u64 << (idx % 64));
                         return;
                     }
                 }
-                BucketState::Tombstone => {}
+                BucketState::Empty => return, // Not found
+                _ => {}
             }
             idx = (idx + 1) & TILE_TABLE_MASK;
+            if idx == start_idx {
+                break;
+            }
         }
     }
 
@@ -485,6 +531,7 @@ impl TileTable {
             bucket.tile.clear();
         }
         self.count = 0;
+        self.occ_mask = [0; 8];
     }
 
     /// Get the number of occupied tiles.
@@ -502,13 +549,11 @@ impl TileTable {
     /// Iterate over all occupied tiles with their coordinates.
     /// Returns (tile_cx, tile_cy, &Tile) for each non-empty tile.
     pub fn iter(&self) -> impl Iterator<Item = (i64, i64, &Tile)> {
-        self.buckets.iter().filter_map(|bucket| {
-            if bucket.state == BucketState::Occupied && bucket.tile.occ_all != 0 {
-                Some((bucket.cx, bucket.cy, &bucket.tile))
-            } else {
-                None
-            }
-        })
+        TileTableIter {
+            table: self,
+            mask_idx: 0,
+            mask: self.occ_mask[0],
+        }
     }
 
     /// Rebuild tiles from a HashMap of pieces.
@@ -533,6 +578,36 @@ impl TileTable {
             .filter(|b| b.state == BucketState::Occupied)
             .map(|b| b.tile.occ_all.count_ones() as usize)
             .sum()
+    }
+}
+
+/// CTZ-based iterator over occupied buckets in the TileTable
+struct TileTableIter<'a> {
+    table: &'a TileTable,
+    mask_idx: usize,
+    mask: u64,
+}
+
+impl<'a> Iterator for TileTableIter<'a> {
+    type Item = (i64, i64, &'a Tile);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.mask != 0 {
+                let bit_idx = self.mask.trailing_zeros() as usize;
+                self.mask &= self.mask - 1;
+                let bucket_idx = self.mask_idx * 64 + bit_idx;
+                let bucket = &self.table.buckets[bucket_idx];
+                return Some((bucket.cx, bucket.cy, &bucket.tile));
+            }
+
+            self.mask_idx += 1;
+            if self.mask_idx >= 8 {
+                return None;
+            }
+            self.mask = self.table.occ_mask[self.mask_idx];
+        }
     }
 }
 
