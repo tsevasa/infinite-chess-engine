@@ -576,6 +576,8 @@ fn generate_captures_for_piece(
         PieceType::Centaur | PieceType::RoyalCentaur => {
             let m = generate_compass_moves(board, from, piece, 1);
             extend_captures_only(board, piece.color(), m, out);
+            let knight_m = generate_leaper_moves(board, from, piece, 1, 2);
+            extend_captures_only(board, piece.color(), knight_m, out);
         }
         PieceType::Hawk => {
             let mut m = generate_compass_moves(board, from, piece, 2);

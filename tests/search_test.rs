@@ -48,6 +48,7 @@ fn setup_2queen_vs_king() -> GameState {
     game
 }
 
+#[allow(dead_code)]
 fn setup_classical_start_position() -> GameState {
     let mut game = GameState::new();
 
