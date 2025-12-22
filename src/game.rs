@@ -695,7 +695,11 @@ impl GameState {
         if self.null_moves > 0 {
             return false;
         }
-        self.halfmove_clock >= self.game_rules.move_rule_limit.unwrap_or(100)
+        // If no move rule is defined, never trigger a draw
+        match self.game_rules.move_rule_limit {
+            Some(limit) => self.halfmove_clock >= limit,
+            None => false,
+        }
     }
 
     /// Make a null move (just flip turn, for null move pruning)

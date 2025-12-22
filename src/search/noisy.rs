@@ -48,7 +48,10 @@ pub fn get_best_move_with_noise(
     searcher.hot.time_limit_ms = time_limit_ms;
     searcher.silent = silent;
     searcher.set_corrhist_mode(game);
-    searcher.move_rule_limit = game.game_rules.move_rule_limit.unwrap_or(100) as i32;
+    searcher.move_rule_limit = game
+        .game_rules
+        .move_rule_limit
+        .map_or(i32::MAX, |v| v as i32);
 
     if noise_amp <= 0 {
         let result = super::get_best_move(game, max_depth, time_limit_ms, silent);

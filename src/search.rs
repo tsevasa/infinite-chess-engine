@@ -1145,7 +1145,10 @@ pub fn get_best_moves_multipv(
         searcher.hot.time_limit_ms = time_limit_ms;
         searcher.silent = silent;
         searcher.set_corrhist_mode(game);
-        searcher.move_rule_limit = game.game_rules.move_rule_limit.unwrap_or(100) as i32;
+        searcher.move_rule_limit = game
+            .game_rules
+            .move_rule_limit
+            .map_or(i32::MAX, |v| v as i32);
 
         let mut lines: Vec<PVLine> = Vec::with_capacity(1);
         if let Some((best_move, score)) = search_with_searcher(&mut searcher, game, max_depth) {
@@ -1167,7 +1170,10 @@ pub fn get_best_moves_multipv(
     searcher.hot.time_limit_ms = time_limit_ms;
     searcher.silent = silent;
     searcher.set_corrhist_mode(game);
-    searcher.move_rule_limit = game.game_rules.move_rule_limit.unwrap_or(100) as i32;
+    searcher.move_rule_limit = game
+        .game_rules
+        .move_rule_limit
+        .map_or(i32::MAX, |v| v as i32);
 
     get_best_moves_multipv_impl(&mut searcher, game, max_depth, multi_pv, silent)
 }

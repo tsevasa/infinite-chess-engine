@@ -7,9 +7,119 @@
 
 use crate::board::{Board, Coordinate, PieceType, PlayerColor};
 use crate::game::GameState;
+use crate::moves::{SpatialIndices, is_square_attacked};
 
 /// Don't run mop-up eval if opponent has >= 20% of starting non-pawn pieces
 const MOP_UP_THRESHOLD_PERCENT: u32 = 20;
+
+#[derive(Clone, Copy)]
+struct SliderInfo {
+    x: i64,
+    y: i64,
+}
+
+/// Detects if the enemy king is trapped in a "local" cage of attacked squares.
+/// Uses a 32x32 local bitboard centered on the enemy king.
+/// Returns (is_caged, reached_area)
+#[inline]
+fn find_bitboard_cage(
+    board: &Board,
+    indices: &SpatialIndices,
+    enemy_king: &Coordinate,
+    our_color: PlayerColor,
+) -> (bool, u32) {
+    // 32x32 local window centered on king
+    // Indices 0..31 map to king_coord - 16 .. king_coord + 15
+    let mut forbidden = [0u32; 32];
+    let origin_x = enemy_king.x - 16;
+    let origin_y = enemy_king.y - 16;
+
+    // 1. Mark forbidden squares (attacked, occupied by our piece, or out of bounds)
+    let (min_x, max_x, min_y, max_y) = crate::moves::get_coord_bounds();
+
+    for local_y in 0..32 {
+        let abs_y = origin_y + local_y as i64;
+        for local_x in 0..32 {
+            let abs_x = origin_x + local_x as i64;
+
+            // If out of bounds, it's a "wall"
+            if abs_x < min_x || abs_x > max_x || abs_y < min_y || abs_y > max_y {
+                forbidden[local_y] |= 1 << local_x;
+                continue;
+            }
+
+            let target = Coordinate::new(abs_x, abs_y);
+
+            // If square is attacked or occupied by our piece, it's a "wall"
+            if is_square_attacked(board, &target, our_color, indices)
+                || board.is_occupied_by_color(abs_x, abs_y, our_color)
+            {
+                forbidden[local_y] |= 1 << local_x;
+            }
+        }
+    }
+
+    // 2. Flood fill from center (16, 16)
+    let mut reachable = [0u32; 32];
+    reachable[16] = 1 << 16;
+
+    // Iterative 8-way dilation
+    for _ in 0..32 {
+        let mut changed = false;
+        let mut next_reachable = reachable;
+
+        for y in 0..32 {
+            if reachable[y] == 0 {
+                continue;
+            }
+
+            // Current row dilation (left/right)
+            let row = reachable[y];
+            let dilated_row = row | (row << 1) | (row >> 1);
+
+            // Propagate to current row and neighbors
+            next_reachable[y] |= dilated_row;
+            if y > 0 {
+                next_reachable[y - 1] |= dilated_row;
+            }
+            if y < 31 {
+                next_reachable[y + 1] |= dilated_row;
+            }
+        }
+
+        // Mask out forbidden squares
+        for y in 0..32 {
+            let prev = reachable[y];
+            next_reachable[y] &= !forbidden[y];
+            if next_reachable[y] != prev {
+                changed = true;
+            }
+            reachable[y] = next_reachable[y];
+        }
+
+        if !changed {
+            break;
+        }
+
+        // Check if we hit the perimeter
+        if (reachable[0] | reachable[31]) != 0 {
+            return (false, 1024);
+        }
+        for y in 1..31 {
+            if (reachable[y] & 0x80000001) != 0 {
+                return (false, 1024);
+            }
+        }
+    }
+
+    // 3. If we finished without hitting perimeter, it's a cage!
+    let mut area = 0u32;
+    for y in 0..32 {
+        area += reachable[y].count_ones();
+    }
+
+    (area > 0 && area < 1000, area)
+}
 
 // ==================== Entry Points ====================
 
@@ -86,9 +196,12 @@ pub fn calculate_mop_up_scale(game: &GameState, losing_color: PlayerColor) -> Op
         return None; // Don't mop-up with just king+pawns
     }
 
-    // If starting pieces is 0 and losing side has 0, it's lone king
+    if losing_pieces == 0 {
+        return Some(100); // Lone king (or king+pawns only) = full mop-up
+    }
+
     if losing_starting == 0 {
-        return if losing_pieces == 0 { Some(100) } else { None };
+        return None;
     }
 
     // Calculate percentage of NON-PAWN material remaining
@@ -142,6 +255,9 @@ fn evaluate_mop_up_core(
     winning_color: PlayerColor,
 ) -> i32 {
     let mut bonus: i32 = 0;
+    let our_dx = our_king.x - enemy_king.x;
+    let our_dy = our_king.y - enemy_king.y;
+    let king_dist = our_dx.abs().max(our_dy.abs()); // Chebyshev distance
 
     // Track closest fences in each direction using scalar min/max
     let mut ortho_y_min_above: i64 = i64::MAX;
@@ -156,7 +272,21 @@ fn evaluate_mop_up_core(
 
     let mut ortho_count: u8 = 0;
     let mut diag_count: u8 = 0;
+    let mut leaper_count: u8 = 0;
+    let mut queen_count: u8 = 0;
+    let mut amazon_count: u8 = 0;
+    let mut total_non_pawn_pieces: u8 = 0;
     let mut short_range_bonus: i32 = 0;
+
+    let mut our_pieces: [crate::evaluation::mop_up::SliderInfo; 24] =
+        [crate::evaluation::mop_up::SliderInfo { x: 0, y: 0 }; 24];
+    let mut our_pieces_count: usize = 0;
+
+    // Track 2nd closest fences for ladder/wall detection
+    let mut ortho_y_min_above_2: i64 = i64::MAX;
+    let mut ortho_y_max_below_2: i64 = i64::MIN;
+    let mut ortho_x_min_right_2: i64 = i64::MAX;
+    let mut ortho_x_max_left_2: i64 = i64::MIN;
 
     let enemy_x = enemy_king.x;
     let enemy_y = enemy_king.y;
@@ -181,19 +311,45 @@ fn evaluate_mop_up_core(
                 | PieceType::Amazon
         );
 
+        if pt != PieceType::King && pt != PieceType::Pawn {
+            if our_pieces_count < 24 {
+                our_pieces[our_pieces_count] = SliderInfo { x, y };
+                our_pieces_count += 1;
+            }
+        }
+
         if has_ortho {
             ortho_count += 1;
-            if y > enemy_y && y < ortho_y_min_above {
-                ortho_y_min_above = y;
+            if y > enemy_y {
+                if y < ortho_y_min_above {
+                    ortho_y_min_above_2 = ortho_y_min_above;
+                    ortho_y_min_above = y;
+                } else if y < ortho_y_min_above_2 {
+                    ortho_y_min_above_2 = y;
+                }
+            } else if y < enemy_y {
+                if y > ortho_y_max_below {
+                    ortho_y_max_below_2 = ortho_y_max_below;
+                    ortho_y_max_below = y;
+                } else if y > ortho_y_max_below_2 {
+                    ortho_y_max_below_2 = y;
+                }
             }
-            if y < enemy_y && y > ortho_y_max_below {
-                ortho_y_max_below = y;
-            }
-            if x > enemy_x && x < ortho_x_min_right {
-                ortho_x_min_right = x;
-            }
-            if x < enemy_x && x > ortho_x_max_left {
-                ortho_x_max_left = x;
+
+            if x > enemy_x {
+                if x < ortho_x_min_right {
+                    ortho_x_min_right_2 = ortho_x_min_right;
+                    ortho_x_min_right = x;
+                } else if x < ortho_x_min_right_2 {
+                    ortho_x_min_right_2 = x;
+                }
+            } else if x < enemy_x {
+                if x > ortho_x_max_left {
+                    ortho_x_max_left_2 = ortho_x_max_left;
+                    ortho_x_max_left = x;
+                } else if x > ortho_x_max_left_2 {
+                    ortho_x_max_left_2 = x;
+                }
             }
         }
 
@@ -225,146 +381,525 @@ fn evaluate_mop_up_core(
             }
         }
 
-        // Short-range pieces proximity bonus
+        if pt == PieceType::Queen || pt == PieceType::RoyalQueen {
+            queen_count += 1;
+        } else if pt == PieceType::Amazon {
+            amazon_count += 1;
+        }
+
+        total_non_pawn_pieces += 1;
+
+        // Short-range pieces proximity bonus (knights, guards, etc.)
+        // CRITICAL: Make this strong enough to force leapers to approach enemy king
+        // ========== UNIVERSAL MOP-UP HEURISTICS (Placement & Checking) ==========
+        let pdx = x - enemy_x;
+        let pdy = y - enemy_y;
+
+        let on_back_x = (our_dx > 0 && pdx < 0) || (our_dx < 0 && pdx > 0);
+        let on_back_y = (our_dy > 0 && pdy < 0) || (our_dy < 0 && pdy > 0);
+
+        // Reward Back Side Placement (Cutting Off Escape relative to our king)
+        if on_back_x {
+            bonus += 350;
+        }
+        if on_back_y {
+            bonus += 350;
+        }
+
+        // Diagonals Back Side
+        let pdp = x + y - enemy_diag_pos;
+        let pdn = x - y - enemy_diag_neg;
+        let our_dp = our_king.x + our_king.y - enemy_diag_pos;
+        let our_dn = our_king.x - our_king.y - enemy_diag_neg;
+        if (our_dp > 0 && pdp < 0) || (our_dp < 0 && pdp > 0) {
+            bonus += 200;
+        }
+        if (our_dn > 0 && pdn < 0) || (our_dn < 0 && pdn > 0) {
+            bonus += 200;
+        }
+
+        // Check Detection & Directional Penalty
+        let is_checking = match pt {
+            PieceType::Rook | PieceType::Chancellor => pdx == 0 || pdy == 0,
+            PieceType::Bishop | PieceType::Archbishop => pdx.abs() == pdy.abs(),
+            PieceType::Queen | PieceType::Amazon | PieceType::RoyalQueen => {
+                pdx == 0 || pdy == 0 || pdx.abs() == pdy.abs()
+            }
+            PieceType::Knight => {
+                (pdx.abs() == 2 && pdy.abs() == 1) || (pdx.abs() == 1 && pdy.abs() == 2)
+            }
+            _ => false,
+        };
+
+        if is_checking {
+            // Penalty for checks that push the enemy king away from our king.
+            // Calibrated: -300 is enough to discourage, but not so much that the king runs away.
+            let is_frontal_check = (our_dx.signum() == pdx.signum() && pdx != 0)
+                || (our_dy.signum() == pdy.signum() && pdy != 0);
+
+            if is_frontal_check {
+                bonus -= 300;
+            } else {
+                bonus -= 100; // Minimal penalty for checks from behind/side
+            }
+        }
+
         if !has_ortho && !has_diag {
-            let dist = (x - enemy_x).abs() + (y - enemy_y).abs();
-            if dist < 12 {
-                short_range_bonus += ((12 - dist) * 4) as i32;
+            leaper_count += 1;
+            let dist = pdx.abs().max(pdy.abs()); // Chebyshev distance
+
+            // Strong bonus for being close - MUST outweigh other mop-up bonuses
+            if dist <= 3 {
+                short_range_bonus += 800; // Very close - huge bonus
+            } else if dist <= 6 {
+                short_range_bonus += 500; // Close
+            } else if dist <= 10 {
+                short_range_bonus += 300; // Medium
+            } else if dist <= 15 {
+                short_range_bonus += 150; // Far but approaching
+            } else if dist <= 25 {
+                short_range_bonus += 80; // Very far
+            } else {
+                // PENALTY for being too far - knight is useless here
+                short_range_bonus -= 400; // Doubled penalty
             }
         }
     }
 
     let total_sliders = ortho_count.max(diag_count);
-    let few_sliders = total_sliders <= 1;
+    let few_pieces = total_non_pawn_pieces <= 2;
 
-    bonus += short_range_bonus * if few_sliders { 2 } else { 1 };
+    // Short-range bonus multiplied when few sliders (leapers are critical)
+    // Scale this even further if we've detected a cage to bring leapers in for the kill
+    bonus += short_range_bonus * if few_pieces { 5 } else { 3 };
 
-    // ========== ORTHOGONAL FENCING ==========
-    if ortho_count > 0 {
-        // Vertical sandwich
-        if ortho_y_min_above != i64::MAX && ortho_y_max_below != i64::MIN {
-            let gap = ortho_y_min_above - ortho_y_max_below - 1;
-            bonus += gap_bonus(gap);
-        }
-        // Horizontal sandwich
-        if ortho_x_min_right != i64::MAX && ortho_x_max_left != i64::MIN {
-            let gap = ortho_x_min_right - ortho_x_max_left - 1;
-            bonus += gap_bonus(gap);
-        }
+    // Determine if we have "overwhelming material" (Cage-Capable)
+    // Absolute power pieces or absolute swarm
+    let is_overwhelming = queen_count >= 1 || amazon_count >= 1 || total_non_pawn_pieces >= 5;
 
-        // Fence closeness
-        if ortho_y_min_above != i64::MAX {
-            bonus += distance_bonus(ortho_y_min_above - enemy_y);
-        }
-        if ortho_y_max_below != i64::MIN {
-            bonus += distance_bonus(enemy_y - ortho_y_max_below);
-        }
-        if ortho_x_min_right != i64::MAX {
-            bonus += distance_bonus(ortho_x_min_right - enemy_x);
-        }
-        if ortho_x_max_left != i64::MIN {
-            bonus += distance_bonus(enemy_x - ortho_x_max_left);
-        }
+    // ========== STRATEGY BRANCHING ==========
+    let losing_color = winning_color.opponent();
+    let is_opponent_lone_king = is_lone_king(game, losing_color);
+    let mut cage_score = 0;
 
-        // Cutting off escape
-        let our_dx = our_king.x - enemy_x;
-        let our_dy = our_king.y - enemy_y;
+    if is_opponent_lone_king {
+        // 1. Bitboard cage check (precise local connectivity)
+        let (bitboard_caged, reached_area) = find_bitboard_cage(
+            &game.board,
+            &game.spatial_indices,
+            enemy_king,
+            winning_color,
+        );
 
-        if our_dx > 0 && ortho_x_max_left != i64::MIN {
-            let cut = enemy_x - ortho_x_max_left;
-            bonus += 250 + if cut <= 3 { (4 - cut) as i32 * 60 } else { 0 };
-        } else if our_dx < 0 && ortho_x_min_right != i64::MAX {
-            let cut = ortho_x_min_right - enemy_x;
-            bonus += 250 + if cut <= 3 { (4 - cut) as i32 * 60 } else { 0 };
-        }
+        // 2. Macro box logic (slider enclosures)
+        let (min_x, max_x, min_y, max_y) = crate::moves::get_coord_bounds();
+        const EDGE_THRESHOLD: i64 = 50;
+        let has_barrier_above = ortho_y_min_above != i64::MAX || (max_y - enemy_y) < EDGE_THRESHOLD;
+        let has_barrier_below = ortho_y_max_below != i64::MIN || (enemy_y - min_y) < EDGE_THRESHOLD;
+        let has_barrier_right = ortho_x_min_right != i64::MAX || (max_x - enemy_x) < EDGE_THRESHOLD;
+        let has_barrier_left = ortho_x_max_left != i64::MIN || (enemy_x - min_x) < EDGE_THRESHOLD;
+        let macro_box =
+            has_barrier_above && has_barrier_below && has_barrier_right && has_barrier_left;
 
-        if our_dy > 0 && ortho_y_max_below != i64::MIN {
-            let cut = enemy_y - ortho_y_max_below;
-            bonus += 250 + if cut <= 3 { (4 - cut) as i32 * 60 } else { 0 };
-        } else if our_dy < 0 && ortho_y_min_above != i64::MAX {
-            let cut = ortho_y_min_above - enemy_y;
-            bonus += 250 + if cut <= 3 { (4 - cut) as i32 * 60 } else { 0 };
-        }
+        let macro_area = if macro_box {
+            let box_width = if ortho_x_min_right != i64::MAX && ortho_x_max_left != i64::MIN {
+                (ortho_x_min_right - ortho_x_max_left - 1).max(1)
+            } else {
+                100
+            };
+            let box_height = if ortho_y_min_above != i64::MAX && ortho_y_max_below != i64::MIN {
+                (ortho_y_min_above - ortho_y_max_below - 1).max(1)
+            } else {
+                100
+            };
+            (box_width * box_height) as u32
+        } else {
+            10000
+        };
 
-        if ortho_count >= 2 {
-            bonus += 240;
-        }
-    }
+        if is_overwhelming {
+            // CASE A: OVERWHELMING - Use precise Cage/Box logic to bring the king for the kill
+            if bitboard_caged {
+                cage_score = if reached_area <= 5 {
+                    2500
+                } else if reached_area <= 10 {
+                    1800
+                } else if reached_area <= 16 {
+                    1200
+                } else if reached_area <= 40 {
+                    800
+                } else if reached_area <= 100 {
+                    400
+                } else {
+                    200
+                };
+            }
+            if macro_box {
+                cage_score = if macro_area <= 100 { 350 } else { 150 };
+            }
+            bonus += cage_score;
 
-    // ========== DIAGONAL FENCING ==========
-    if diag_count > 0 {
-        if diag_pos_min_above != i64::MAX && diag_pos_max_below != i64::MIN {
-            let gap = diag_pos_min_above - diag_pos_max_below - 2;
-            bonus += gap_bonus(gap);
-        }
-        if diag_neg_min_above != i64::MAX && diag_neg_max_below != i64::MIN {
-            let gap = diag_neg_min_above - diag_neg_max_below - 2;
-            bonus += gap_bonus(gap);
-        }
+            // Continuous King Approach Gradient
+            // CRITICAL: We want the king to approach EVEN IF not caged yet
+            let king_approach_bonus = (100 - king_dist.min(100) as i32) * 60; // Increased to 60
+            bonus += king_approach_bonus;
 
-        if diag_pos_min_above != i64::MAX {
-            bonus += distance_bonus(diag_pos_min_above - enemy_diag_pos);
-        }
-        if diag_pos_max_below != i64::MIN {
-            bonus += distance_bonus(enemy_diag_pos - diag_pos_max_below);
-        }
-        if diag_neg_min_above != i64::MAX {
-            bonus += distance_bonus(diag_neg_min_above - enemy_diag_neg);
-        }
-        if diag_neg_max_below != i64::MIN {
-            bonus += distance_bonus(enemy_diag_neg - diag_neg_max_below);
-        }
+            if king_dist <= 2 {
+                bonus += 500;
+            }
 
-        let our_dx = our_king.x - enemy_x;
-        let our_dy = our_king.y - enemy_y;
-        let diag_pos_dir = our_dx + our_dy;
-        let diag_neg_dir = our_dx - our_dy;
+            // ALL PIECES should approach once caged - add unified approach bonuses
+            for i in 0..our_pieces_count {
+                let s = &our_pieces[i];
+                let dist = (s.x - enemy_x).abs().max((s.y - enemy_y).abs()); // Chebyshev distance
 
-        if diag_pos_dir > 0 && diag_pos_max_below != i64::MIN {
-            let cut = enemy_diag_pos - diag_pos_max_below;
-            bonus += 200 + if cut <= 4 { (5 - cut) as i32 * 50 } else { 0 };
-        } else if diag_pos_dir < 0 && diag_pos_min_above != i64::MAX {
-            let cut = diag_pos_min_above - enemy_diag_pos;
-            bonus += 200 + if cut <= 4 { (5 - cut) as i32 * 50 } else { 0 };
-        }
+                // Scale by cage tightness - tighter cage = more urgency to close in
+                let approach_weight = if bitboard_caged && reached_area <= 16 {
+                    120 // Massive weight for tight cages
+                } else if bitboard_caged {
+                    80
+                } else if macro_box {
+                    50
+                } else {
+                    40 // Slightly increased base weight
+                };
 
-        if diag_neg_dir > 0 && diag_neg_max_below != i64::MIN {
-            let cut = enemy_diag_neg - diag_neg_max_below;
-            bonus += 200 + if cut <= 4 { (5 - cut) as i32 * 50 } else { 0 };
-        } else if diag_neg_dir < 0 && diag_neg_min_above != i64::MAX {
-            let cut = diag_neg_min_above - enemy_diag_neg;
-            bonus += 200 + if cut <= 4 { (5 - cut) as i32 * 50 } else { 0 };
-        }
+                const LONG_RANGE: i64 = 100;
+                bonus += ((LONG_RANGE - dist.min(LONG_RANGE)) as i32) * approach_weight;
 
-        if diag_count >= 2 {
-            bonus += 240;
-        }
-    }
+                // TEAMWORK: Reward pieces for staying within semi-reasonable range of our king
+                // This prevents the "Amazon in corner, King in other corner" drift.
+                let king_piece_dist = (s.x - our_king.x).abs().max((s.y - our_king.y).abs());
+                bonus += (60 - king_piece_dist.min(60) as i32) * 15;
+            }
+        } else if ortho_count == 2
+            && diag_count == 0
+            && leaper_count == 0
+            && total_non_pawn_pieces == 2
+        {
+            // ========== HARDCODED 2R+K vs K ENDGAME ==========
+            // Rooks must cut the king from the OPPOSITE side of our king.
+            // King only approaches once enemy is boxed.
 
-    // ========== KING INVOLVEMENT ==========
-    let king_dist = (our_king.x - enemy_x).abs() + (our_king.y - enemy_y).abs();
+            let mut has_sand_v = false;
+            let closest_above = if ortho_y_min_above != i64::MAX {
+                Some(ortho_y_min_above)
+            } else {
+                None
+            };
+            let closest_below = if ortho_y_max_below != i64::MIN {
+                Some(ortho_y_max_below)
+            } else {
+                None
+            };
+            let closest_right = if ortho_x_min_right != i64::MAX {
+                Some(ortho_x_min_right)
+            } else {
+                None
+            };
+            let closest_left = if ortho_x_max_left != i64::MIN {
+                Some(ortho_x_max_left)
+            } else {
+                None
+            };
 
-    if total_sliders < 3 {
-        let prox = (30 - king_dist.min(30)) as i32;
-        bonus += prox * 45;
+            if let (Some(ca), Some(cb)) = (closest_above, closest_below) {
+                has_sand_v = true;
+                let gap = ca - cb - 1;
+                bonus += if gap <= 1 {
+                    800
+                } else if gap <= 2 {
+                    600
+                } else if gap <= 3 {
+                    450
+                } else if gap <= 5 {
+                    300
+                } else {
+                    150
+                };
+            }
 
-        let dx = (our_king.x - enemy_x).abs();
-        let dy = (our_king.y - enemy_y).abs();
+            let mut has_sand_h = false;
+            if let (Some(cr), Some(cl)) = (closest_right, closest_left) {
+                has_sand_h = true;
+                let gap = cr - cl - 1;
+                bonus += if gap <= 1 {
+                    800
+                } else if gap <= 2 {
+                    600
+                } else if gap <= 3 {
+                    450
+                } else if gap <= 5 {
+                    300
+                } else {
+                    150
+                };
+            }
 
-        if (dx == 2 && dy == 0) || (dx == 0 && dy == 2) {
-            bonus += 280;
+            // Mutual protection
+            let mut protected_count = 0;
+            for i in 0..our_pieces_count {
+                for j in 0..our_pieces_count {
+                    if i != j
+                        && (our_pieces[i].x == our_pieces[j].x
+                            || our_pieces[i].y == our_pieces[j].y)
+                    {
+                        protected_count += 1;
+                        break;
+                    }
+                }
+            }
+            bonus += protected_count as i32 * 200;
+
+            // Fence closeness
+            for i in 0..our_pieces_count {
+                let s = &our_pieces[i];
+                let rank_dist = (s.y - enemy_y).abs();
+                let file_dist = (s.x - enemy_x).abs();
+                if s.y != enemy_y {
+                    bonus += if rank_dist == 1 {
+                        250
+                    } else if rank_dist == 2 {
+                        180
+                    } else if rank_dist <= 4 {
+                        120
+                    } else {
+                        40
+                    };
+                }
+                if s.x != enemy_x {
+                    bonus += if file_dist == 1 {
+                        250
+                    } else if file_dist == 2 {
+                        180
+                    } else if file_dist <= 4 {
+                        120
+                    } else {
+                        40
+                    };
+                }
+            }
+
+            // RUN calculations
+            let run_up = closest_above.map(|f| f - enemy_y - 1).unwrap_or(100);
+            let run_down = closest_below.map(|f| enemy_y - f - 1).unwrap_or(100);
+            let run_right = closest_right.map(|f| f - enemy_x - 1).unwrap_or(100);
+            let run_left = closest_left.map(|f| enemy_x - f - 1).unwrap_or(100);
+
+            const RUN_GRACE: i64 = 2;
+            let run_away_h = if our_dx > 0 {
+                run_left
+            } else if our_dx < 0 {
+                run_right
+            } else {
+                run_left.max(run_right)
+            };
+            let run_away_v = if our_dy > 0 {
+                run_down
+            } else if our_dy < 0 {
+                run_up
+            } else {
+                run_up.max(run_down)
+            };
+            let enemy_can_run_away = run_away_h > RUN_GRACE || run_away_v > RUN_GRACE;
+
+            let rooks_protected =
+                protected_count >= 2 || (protected_count >= 1 && our_pieces_count >= 2);
+            let should_approach =
+                !enemy_can_run_away || rooks_protected || has_sand_h || has_sand_v;
+
+            if should_approach {
+                let prox = (30 - king_dist.min(30)) as i32;
+                bonus += prox * 50;
+                let dx_abs = our_dx.abs();
+                let dy_abs = our_dy.abs();
+                if dx_abs <= 2 && dy_abs <= 2 {
+                    bonus += 200;
+                }
+                if dx_abs <= 1 && dy_abs <= 1 && (dx_abs + dy_abs) > 0 {
+                    bonus += 100;
+                }
+            } else {
+                let prox = (20 - king_dist.min(20)) as i32;
+                bonus += prox * 3;
+            }
+        } else {
+            // CASE B: TECHNICAL/SPARSE - Use technical Ladders/Sandwiches.
+            let mut protected_count = 0;
+            for i in 0..our_pieces_count {
+                let s = &our_pieces[i];
+                let coord = Coordinate::new(s.x, s.y);
+                if crate::moves::is_square_attacked(
+                    &game.board,
+                    &coord,
+                    winning_color,
+                    &game.spatial_indices,
+                ) {
+                    protected_count += 1;
+                }
+            }
+            bonus += protected_count as i32 * 200;
+
+            let mut sand_h = false;
+            let mut sand_v = false;
+            let mut tight_h = false;
+            let mut tight_v = false;
+            if ortho_y_min_above != i64::MAX && ortho_y_max_below != i64::MIN {
+                let gap = ortho_y_min_above - ortho_y_max_below - 1;
+                if gap <= 3 {
+                    sand_v = true;
+                    if gap <= 1 {
+                        tight_v = true;
+                    }
+                }
+                bonus += if gap <= 1 {
+                    800
+                } else if gap <= 2 {
+                    600
+                } else if gap <= 3 {
+                    500
+                } else {
+                    200
+                };
+            }
+            if ortho_x_min_right != i64::MAX && ortho_x_max_left != i64::MIN {
+                let gap = ortho_x_min_right - ortho_x_max_left - 1;
+                if gap <= 3 {
+                    sand_h = true;
+                    if gap <= 1 {
+                        tight_h = true;
+                    }
+                }
+                bonus += if gap <= 1 {
+                    800
+                } else if gap <= 2 {
+                    600
+                } else if gap <= 3 {
+                    500
+                } else {
+                    200
+                };
+            }
+            let mut sand_dp = false;
+            let mut sand_dn = false;
+            if diag_pos_min_above != i64::MAX && diag_pos_max_below != i64::MIN {
+                let gap = diag_pos_min_above - diag_pos_max_below - 1;
+                if gap <= 2 {
+                    sand_dp = true;
+                }
+                bonus += if gap <= 1 {
+                    600
+                } else if gap <= 2 {
+                    450
+                } else {
+                    150
+                };
+            }
+            if diag_neg_min_above != i64::MAX && diag_neg_max_below != i64::MIN {
+                let gap = diag_neg_min_above - diag_neg_max_below - 1;
+                if gap <= 2 {
+                    sand_dn = true;
+                }
+                bonus += if gap <= 1 {
+                    600
+                } else if gap <= 2 {
+                    450
+                } else {
+                    150
+                };
+            }
+
+            let mut ladder = false;
+            if ortho_count >= 2 {
+                let ladder_x = (ortho_x_min_right != i64::MAX
+                    && ortho_x_min_right_2 != i64::MAX
+                    && (ortho_x_min_right_2 - ortho_x_min_right) == 1)
+                    || (ortho_x_max_left != i64::MIN
+                        && ortho_x_max_left_2 != i64::MIN
+                        && (ortho_x_max_left - ortho_x_max_left_2) == 1);
+                let ladder_y = (ortho_y_min_above != i64::MAX
+                    && ortho_y_min_above_2 != i64::MAX
+                    && (ortho_y_min_above_2 - ortho_y_min_above) == 1)
+                    || (ortho_y_max_below != i64::MIN
+                        && ortho_y_max_below_2 != i64::MIN
+                        && (ortho_y_max_below - ortho_y_max_below_2) == 1);
+                if ladder_x || ladder_y {
+                    ladder = true;
+                    bonus += 1200;
+                }
+            }
+
+            let r_up = if ortho_y_min_above != i64::MAX {
+                ortho_y_min_above - enemy_y - 1
+            } else {
+                15
+            };
+            let r_down = if ortho_y_max_below != i64::MIN {
+                enemy_y - ortho_y_max_below - 1
+            } else {
+                15
+            };
+            let r_right = if ortho_x_min_right != i64::MAX {
+                ortho_x_min_right - enemy_x - 1
+            } else {
+                15
+            };
+            let r_left = if ortho_x_max_left != i64::MIN {
+                enemy_x - ortho_x_max_left - 1
+            } else {
+                15
+            };
+            let run_h = if our_dx > 0 {
+                r_left
+            } else if our_dx < 0 {
+                r_right
+            } else {
+                r_left.max(r_right)
+            };
+            let run_v = if our_dy > 0 {
+                r_down
+            } else if our_dy < 0 {
+                r_up
+            } else {
+                r_up.max(r_down)
+            };
+            bonus += (20 - run_h.min(20)) as i32 * 60;
+            bonus += (20 - run_v.min(20)) as i32 * 60;
+
+            let is_contained = ladder
+                || (sand_h && tight_h)
+                || (sand_v && tight_v)
+                || (sand_h && sand_v)
+                || (sand_dp && sand_dn)
+                || (bitboard_caged && reached_area <= 12);
+
+            // Continuous King Approach Gradient for Case B too (Dominant)
+            let king_approach_bonus = (100 - king_dist.min(100) as i32) * 40; // Increased to 40
+            bonus += king_approach_bonus;
+
+            // Technical piece approach (Long range)
+            for i in 0..our_pieces_count {
+                let s = &our_pieces[i];
+                let dist = (s.x - enemy_x).abs().max((s.y - enemy_y).abs());
+                let king_piece_dist = (s.x - our_king.x).abs().max((s.y - our_king.y).abs());
+
+                // Pieces approach even in technical branch
+                bonus += (80 - dist.min(80) as i32) * 20;
+                // Pieces stay with king
+                bonus += (50 - king_piece_dist.min(50) as i32) * 12;
+            }
+
+            if is_contained {
+                let prox = (30 - king_dist.min(30)) as i32;
+                bonus += prox * 80;
+                if king_dist <= 2 {
+                    bonus += 400;
+                }
+            } else {
+                let prox = (20 - king_dist.min(20)) as i32;
+                bonus += prox * 2;
+            }
         }
-        if dx == 2 && dy == 2 {
-            bonus += 200;
-        }
-        if dx <= 2 && dy <= 2 {
-            bonus += 180;
-        }
-        if dx <= 1 && dy <= 1 && dx + dy > 0 {
-            bonus += 120;
-        }
-    } else {
-        bonus += ((15 - king_dist.min(15)) * 3) as i32;
     }
 
     if total_sliders >= 2 {
@@ -381,38 +916,6 @@ fn evaluate_mop_up_core(
 }
 
 // ==================== Helper Functions ====================
-
-#[inline(always)]
-fn gap_bonus(gap: i64) -> i32 {
-    if gap <= 1 {
-        650
-    } else if gap <= 2 {
-        500
-    } else if gap <= 3 {
-        380
-    } else if gap <= 5 {
-        280
-    } else if gap <= 8 {
-        180
-    } else {
-        100
-    }
-}
-
-#[inline(always)]
-fn distance_bonus(dist: i64) -> i32 {
-    if dist <= 1 {
-        220
-    } else if dist <= 2 {
-        160
-    } else if dist <= 4 {
-        110
-    } else if dist <= 6 {
-        60
-    } else {
-        25
-    }
-}
 
 /// Determine if king is needed for mate based on material
 #[inline(always)]

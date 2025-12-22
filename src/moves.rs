@@ -38,6 +38,13 @@ pub fn get_world_size() -> i64 {
     }
 }
 
+/// Get all coordinate bounds (min_x, max_x, min_y, max_y).
+/// Used for cage detection in mop-up evaluation.
+#[inline]
+pub fn get_coord_bounds() -> (i64, i64, i64, i64) {
+    unsafe { (COORD_MIN_X, COORD_MAX_X, COORD_MIN_Y, COORD_MAX_Y) }
+}
+
 /// Generate all pseudo-legal moves for a Knightrider.
 /// A Knightrider slides like a knight repeated along its direction until blocked or out of bounds.
 fn generate_knightrider_moves(board: &Board, from: &Coordinate, piece: &Piece) -> MoveList {
@@ -1018,15 +1025,23 @@ fn generate_pawn_moves(
         PlayerColor::Neutral => unsafe { std::hint::unreachable_unchecked() },
     };
 
-    // Get promotion ranks for this color (default to 8 for white, 1 for black if not specified)
+    // Get promotion ranks for this color
+    // If promotion_ranks is not set AND promotions_allowed is not set, use empty (no promotions)
     let promotion_ranks: Vec<i64> = if let Some(ref ranks) = game_rules.promotion_ranks {
         match piece.color() {
             PlayerColor::White => ranks.white.clone(),
             PlayerColor::Black => ranks.black.clone(),
             PlayerColor::Neutral => unsafe { std::hint::unreachable_unchecked() },
         }
+    } else if game_rules
+        .promotions_allowed
+        .as_ref()
+        .map_or(true, |v| v.is_empty())
+    {
+        // No promotion_ranks AND no promotions_allowed = no promotions anywhere
+        vec![]
     } else {
-        // Default promotion ranks for standard chess
+        // promotions_allowed is set but no ranks = use classical defaults
         match piece.color() {
             PlayerColor::White => vec![8],
             PlayerColor::Black => vec![1],
@@ -1151,14 +1166,23 @@ fn generate_pawn_capture_moves(
         PlayerColor::Neutral => unsafe { std::hint::unreachable_unchecked() },
     };
 
-    // Get promotion ranks for this color (default to 8 for white, 1 for black if not specified)
+    // Get promotion ranks for this color
+    // If promotion_ranks is not set AND promotions_allowed is not set, use empty (no promotions)
     let promotion_ranks: Vec<i64> = if let Some(ref ranks) = game_rules.promotion_ranks {
         match piece.color() {
             PlayerColor::White => ranks.white.clone(),
             PlayerColor::Black => ranks.black.clone(),
             PlayerColor::Neutral => unsafe { std::hint::unreachable_unchecked() },
         }
+    } else if game_rules
+        .promotions_allowed
+        .as_ref()
+        .map_or(true, |v| v.is_empty())
+    {
+        // No promotion_ranks AND no promotions_allowed = no promotions anywhere
+        vec![]
     } else {
+        // promotions_allowed is set but no ranks = use classical defaults
         match piece.color() {
             PlayerColor::White => vec![8],
             PlayerColor::Black => vec![1],
@@ -2695,13 +2719,22 @@ fn generate_pawn_moves_into(
     };
 
     // Get promotion ranks for this color
+    // If promotion_ranks is not set AND promotions_allowed is not set, use empty (no promotions)
     let promotion_ranks: Vec<i64> = if let Some(ref ranks) = game_rules.promotion_ranks {
         match piece.color() {
             PlayerColor::White => ranks.white.clone(),
             PlayerColor::Black => ranks.black.clone(),
             PlayerColor::Neutral => unsafe { std::hint::unreachable_unchecked() },
         }
+    } else if game_rules
+        .promotions_allowed
+        .as_ref()
+        .map_or(true, |v| v.is_empty())
+    {
+        // No promotion_ranks AND no promotions_allowed = no promotions anywhere
+        vec![]
     } else {
+        // promotions_allowed is set but no ranks = use classical defaults
         match piece.color() {
             PlayerColor::White => vec![8],
             PlayerColor::Black => vec![1],
@@ -2759,11 +2792,19 @@ fn generate_pawn_moves_into(
             promotion_pieces,
         );
 
-        // Double push
+        // Double push (can also result in promotion in some variants)
         if special_rights.contains(from) {
             let to_y_2 = from.y + (direction * 2);
             if board.get_piece(to_x, to_y_2).is_none() {
-                out.push(Move::new(*from, Coordinate::new(to_x, to_y_2), *piece));
+                add_pawn_move(
+                    out,
+                    *from,
+                    to_x,
+                    to_y_2,
+                    *piece,
+                    &promotion_ranks,
+                    promotion_pieces,
+                );
             }
         }
     }

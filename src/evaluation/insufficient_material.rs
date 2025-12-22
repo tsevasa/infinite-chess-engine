@@ -15,6 +15,61 @@ pub fn clear_material_cache() {
     MATERIAL_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
+/// Helper: get the best piece type a pawn can promote to (highest material value)
+/// Returns Queen if any promotion mechanism is enabled (promotion_types, promotions_allowed, or promotion_ranks)
+fn get_best_promotion_piece(game_rules: &crate::game::GameRules) -> Option<PieceType> {
+    // If promotion_types is set and non-empty, find the best piece
+    if let Some(ref types) = game_rules.promotion_types {
+        if !types.is_empty() {
+            return types
+                .iter()
+                .max_by_key(|pt| super::base::get_piece_value(**pt))
+                .copied();
+        }
+    }
+
+    None
+}
+
+/// Check if a pawn at position y can still promote for the given color
+fn can_pawn_promote(y: i64, color: PlayerColor, game_rules: &crate::game::GameRules) -> bool {
+    // Get promotion ranks for this color
+    let promo_ranks = if let Some(ref ranks) = game_rules.promotion_ranks {
+        match color {
+            PlayerColor::White => &ranks.white,
+            PlayerColor::Black => &ranks.black,
+            PlayerColor::Neutral => return false,
+        }
+    } else if game_rules
+        .promotions_allowed
+        .as_ref()
+        .map_or(true, |v| v.is_empty())
+    {
+        // No promotion ranks AND no promotions_allowed = no promotions
+        return false;
+    } else {
+        // Use classical defaults: white promotes at 8, black at 1
+        return match color {
+            PlayerColor::White => y < 8,
+            PlayerColor::Black => y > 1,
+            PlayerColor::Neutral => false,
+        };
+    };
+
+    if promo_ranks.is_empty() {
+        return false;
+    }
+
+    // Pawn can promote if it hasn't passed all promotion ranks
+    // For white: pawn at y can promote if any rank > y exists
+    // For black: pawn at y can promote if any rank < y exists
+    match color {
+        PlayerColor::White => promo_ranks.iter().any(|&rank| rank > y),
+        PlayerColor::Black => promo_ranks.iter().any(|&rank| rank < y),
+        PlayerColor::Neutral => false,
+    }
+}
+
 /// Check if a side has sufficient material to force checkmate in infinite chess.
 /// Based on the official insufficientmaterial.ts from infinitechess.org
 ///
@@ -25,10 +80,21 @@ pub fn clear_material_cache() {
 /// IMPORTANT: On infinite/unbounded boards (world size >= 100), the king can
 /// escape forever, so standard chess mating patterns don't work. On bounded
 /// boards (< 100), standard chess rules apply.
-fn has_sufficient_mating_material(board: &Board, color: PlayerColor, has_our_king: bool) -> bool {
+///
+/// NEW: Promotable pawns are counted as the best piece they can promote to.
+/// This fixes cases like 2R+P vs K being marked insufficient when P can promote.
+fn has_sufficient_mating_material(
+    board: &Board,
+    color: PlayerColor,
+    has_our_king: bool,
+    game_rules: &crate::game::GameRules,
+) -> bool {
     // Check if we're on a bounded board (standard chess rules apply)
     let world_size = crate::moves::get_world_size();
     let is_bounded = world_size < 100;
+
+    // Get best promotion piece for this color (if any)
+    let best_promo = get_best_promotion_piece(game_rules);
 
     let mut queens = 0;
     let mut rooks = 0;
@@ -65,7 +131,34 @@ fn has_sufficient_mating_material(board: &Board, color: PlayerColor, has_our_kin
             PieceType::Archbishop => archbishops += 1,
             PieceType::Hawk => hawks += 1,
             PieceType::Guard => guards += 1,
-            PieceType::Pawn => pawns += 1,
+            PieceType::Pawn => {
+                // KEY CHANGE: If this pawn can promote, count it as the best promotion piece
+                if let Some(promo_piece) = best_promo {
+                    if can_pawn_promote(*y, color, game_rules) {
+                        // Count as the promotion piece instead of a pawn
+                        match promo_piece {
+                            PieceType::Queen | PieceType::RoyalQueen => queens += 1,
+                            PieceType::Rook => rooks += 1,
+                            PieceType::Bishop => bishops += 1,
+                            PieceType::Knight => knights += 1,
+                            PieceType::Chancellor => chancellors += 1,
+                            PieceType::Archbishop => archbishops += 1,
+                            PieceType::Hawk => hawks += 1,
+                            PieceType::Guard => guards += 1,
+                            PieceType::Amazon => amazons += 1,
+                            PieceType::Knightrider => knightriders += 1,
+                            PieceType::Huygen => huygens += 1,
+                            _ => pawns += 1,
+                        }
+                    } else {
+                        // Pawn past promotion rank - just count as pawn
+                        pawns += 1;
+                    }
+                } else {
+                    // No promotions possible - count as pawn
+                    pawns += 1;
+                }
+            }
             PieceType::Amazon => amazons += 1,
             PieceType::Knightrider => knightriders += 1,
             PieceType::Huygen => huygens += 1,
@@ -554,29 +647,40 @@ pub fn evaluate_insufficient_material(game: &crate::game::GameState) -> Option<i
 
     // Check cache using material_hash
     let material_hash = game.material_hash;
-    let cached = MATERIAL_CACHE.with(|cache| cache.borrow().get(&material_hash).copied());
 
-    if let Some(result) = cached {
-        return result;
+    // IMPORTANT: Only use cache if there are no pawns on the board,
+    // because pawn promotion potential depends on their Y-coordinate which is NOT in the material_hash.
+    // Also, piece counts are small anyway, so iteration is fast.
+    let has_pawns = game.white_pawn_count > 0 || game.black_pawn_count > 0;
+
+    if !has_pawns {
+        let cached = MATERIAL_CACHE.with(|cache| cache.borrow().get(&material_hash).copied());
+        if let Some(result) = cached {
+            return result;
+        }
     }
 
-    // Cache miss - compute insufficient material
-    let result = compute_insufficient_material(board);
+    // Cache miss or has pawns - compute insufficient material
+    let result = compute_insufficient_material(game);
 
-    // Store in cache (limit size)
-    MATERIAL_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.len() > 4096 {
-            cache.clear();
-        }
-        cache.insert(material_hash, result);
-    });
+    // Store in cache (limit size) if no pawns
+    if !has_pawns {
+        MATERIAL_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() > 4096 {
+                cache.clear();
+            }
+            cache.insert(material_hash, result);
+        });
+    }
 
     result
 }
 
 /// Core insufficient material computation. Called on cache miss.
-fn compute_insufficient_material(board: &Board) -> Option<i32> {
+fn compute_insufficient_material(game: &crate::game::GameState) -> Option<i32> {
+    let board = &game.board;
+    let game_rules = &game.game_rules;
     // Count pieces for each side
     let mut white_has_king = false;
     let mut black_has_king = false;
@@ -605,8 +709,10 @@ fn compute_insufficient_material(board: &Board) -> Option<i32> {
     }
 
     // Check if each side can force mate
-    let white_can_mate = has_sufficient_mating_material(board, PlayerColor::White, white_has_king);
-    let black_can_mate = has_sufficient_mating_material(board, PlayerColor::Black, black_has_king);
+    let white_can_mate =
+        has_sufficient_mating_material(board, PlayerColor::White, white_has_king, game_rules);
+    let black_can_mate =
+        has_sufficient_mating_material(board, PlayerColor::Black, black_has_king, game_rules);
 
     // 1. If either side can force mate, use normal evaluation
     if white_can_mate || black_can_mate {

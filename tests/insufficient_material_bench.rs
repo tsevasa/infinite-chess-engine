@@ -280,3 +280,100 @@ fn test_insufficient_material_correctness() {
 
     println!("All correctness tests passed!");
 }
+
+/// Test that 2R+P vs K with promotable pawn is sufficient (pawn can become Queen)
+#[test]
+fn test_promotable_pawn_makes_sufficient() {
+    use hydrochess_wasm::game::{GameRules, PromotionRanks};
+
+    // Position: Black has 2 Rooks + 1 Pawn at y=7, White has just King
+    // Black pawn at y=7 can promote at y=1, so it counts as a Queen
+    // 2R + Q (pawn) = SUFFICIENT
+    let mut board = Board::new();
+    board.set_piece(20, 5, Piece::new(PieceType::King, PlayerColor::White)); // White King
+    board.set_piece(2, 0, Piece::new(PieceType::Rook, PlayerColor::Black)); // Black Rook
+    board.set_piece(4, 0, Piece::new(PieceType::Rook, PlayerColor::Black)); // Black Rook
+    board.set_piece(2, 7, Piece::new(PieceType::Pawn, PlayerColor::Black)); // Black Pawn at y=7
+
+    let mut game = GameState::new();
+    game.board = board;
+
+    // Set up promotion rules: White promotes at 8, Black promotes at 1
+    game.game_rules = GameRules {
+        promotion_ranks: Some(PromotionRanks {
+            white: vec![8],
+            black: vec![1],
+        }),
+        promotion_types: Some(vec![
+            PieceType::Queen,
+            PieceType::Rook,
+            PieceType::Bishop,
+            PieceType::Knight,
+        ]),
+        promotions_allowed: Some(vec![
+            "q".to_string(),
+            "r".to_string(),
+            "b".to_string(),
+            "n".to_string(),
+        ]),
+        move_rule_limit: None,
+    };
+
+    game.recompute_hash();
+    game.recompute_correction_hashes();
+
+    // Black pawn at y=7 can promote to Queen at y=1
+    // So Black has: 2R + "Q" = SUFFICIENT (not a dead draw)
+    let result = evaluate_insufficient_material(&game);
+    assert_eq!(
+        result, None,
+        "2R+P vs K with promotable pawn should be None (sufficient material), got {:?}",
+        result
+    );
+
+    println!("2R+P vs K promotable pawn test passed!");
+}
+
+/// Test that pawn PAST promotion rank is NOT counted as promotable
+#[test]
+fn test_pawn_past_promo_rank_not_promotable() {
+    use hydrochess_wasm::game::{GameRules, PromotionRanks};
+
+    // Position: Black has 2 Rooks + 1 Pawn at y=0 (PAST the promo rank of 1)
+    // The pawn has already passed rank 1, so it can't promote anymore
+    // 2R + P (non-promotable) is in the insufficient list
+    let mut board = Board::new();
+    board.set_piece(20, 5, Piece::new(PieceType::King, PlayerColor::White));
+    board.set_piece(2, 0, Piece::new(PieceType::Rook, PlayerColor::Black));
+    board.set_piece(4, 0, Piece::new(PieceType::Rook, PlayerColor::Black));
+    board.set_piece(5, 0, Piece::new(PieceType::Pawn, PlayerColor::Black)); // Pawn at y=0 (past promo rank 1)
+
+    let mut game = GameState::new();
+    game.board = board;
+
+    game.game_rules = GameRules {
+        promotion_ranks: Some(PromotionRanks {
+            white: vec![8],
+            black: vec![1],
+        }),
+        promotion_types: Some(vec![PieceType::Queen, PieceType::Rook]),
+        promotions_allowed: Some(vec!["q".to_string(), "r".to_string()]),
+        move_rule_limit: None,
+    };
+
+    game.recompute_hash();
+    game.recompute_correction_hashes();
+
+    // Black pawn at y=0 CANNOT promote (already past rank 1)
+    // So Black has: 2R + P (non-promotable)
+    // This matches {rooksW: 2, pawnsW: 1} which is insufficient in 0K scenarios
+    let result = evaluate_insufficient_material(&game);
+    assert_eq!(
+        result,
+        Some(0),
+        "2R+P vs K with non-promotable pawn should be Some(0) (insufficient), got {:?}",
+        result
+    );
+
+    println!("Pawn past promo rank test passed!");
+}
