@@ -563,182 +563,148 @@ fn evaluate_mop_up_core(
             && total_non_pawn_pieces == 2
         {
             // ========== HARDCODED 2R+K vs K ENDGAME ==========
-            // Rooks must cut the king from the OPPOSITE side of our king.
-            // King only approaches once enemy is boxed.
+            // The "Lock and Key" technique:
+            // 1. LOCK: Rooks must protect each other on the SAME rank or file. (+2000)
+            // 2. TOGETHER: Rooks must be close to each other, not spread out. (-50 per square)
+            // 3. OPPOSITE: Rooks must be on the opposite side of enemy from our king. (+1000)
+            // 4. CUT: Rooks must be 1-2 ranks/files away from enemy. (+500)
+            // 5. KEY: King approaches to finish the job. (100x multiplier)
 
-            let mut has_sand_v = false;
-            let closest_above = if ortho_y_min_above != i64::MAX {
-                Some(ortho_y_min_above)
+            let (r1_x, r1_y, r2_x, r2_y) = if our_pieces_count == 2 {
+                (
+                    our_pieces[0].x,
+                    our_pieces[0].y,
+                    our_pieces[1].x,
+                    our_pieces[1].y,
+                )
             } else {
-                None
-            };
-            let closest_below = if ortho_y_max_below != i64::MIN {
-                Some(ortho_y_max_below)
-            } else {
-                None
-            };
-            let closest_right = if ortho_x_min_right != i64::MAX {
-                Some(ortho_x_min_right)
-            } else {
-                None
-            };
-            let closest_left = if ortho_x_max_left != i64::MIN {
-                Some(ortho_x_max_left)
-            } else {
-                None
+                (0, 0, 0, 0)
             };
 
-            if let (Some(ca), Some(cb)) = (closest_above, closest_below) {
-                has_sand_v = true;
+            // ========== 1. ROOK MUTUAL PROTECTION & STABILITY ==========
+            let rooks_on_same_rank = r1_y == r2_y;
+            let rooks_on_same_file = r1_x == r2_x;
+            let rooks_protecting = rooks_on_same_rank || rooks_on_same_file;
+
+            if rooks_protecting {
+                bonus += 2000; // Absolute priority: Stay protected!
+
+                // PREVENT SHUFFLING: Reward being close to each other
+                let rook_dist_between = (r1_x - r2_x).abs() + (r1_y - r2_y).abs();
+                bonus -= (rook_dist_between as i32) * 50;
+            } else {
+                bonus -= 2000; // Pathological state: Fix immediately
+            }
+
+            // ========== 2. SANDWICH DETECTION (CUTTING) ==========
+            let has_rook_above = r1_y > enemy_y || r2_y > enemy_y;
+            let has_rook_below = r1_y < enemy_y || r2_y < enemy_y;
+            let has_rook_right = r1_x > enemy_x || r2_x > enemy_x;
+            let has_rook_left = r1_x < enemy_x || r2_x < enemy_x;
+
+            let has_sandwich_v = has_rook_above && has_rook_below;
+            let has_sandwich_h = has_rook_right && has_rook_left;
+
+            if has_sandwich_v {
+                bonus += 1000;
+                let ca = if r1_y > enemy_y { r1_y } else { r2_y }.min(if r2_y > enemy_y {
+                    r2_y
+                } else {
+                    r1_y
+                });
+                let cb = if r1_y < enemy_y { r1_y } else { r2_y }.max(if r2_y < enemy_y {
+                    r2_y
+                } else {
+                    r1_y
+                });
                 let gap = ca - cb - 1;
-                bonus += if gap <= 1 {
-                    160
-                } else if gap <= 2 {
-                    120
-                } else if gap <= 3 {
-                    90
-                } else if gap <= 5 {
-                    60
-                } else {
-                    30
-                };
+                bonus += (8 - gap.min(8) as i32) * 150;
             }
-
-            let mut has_sand_h = false;
-            if let (Some(cr), Some(cl)) = (closest_right, closest_left) {
-                has_sand_h = true;
+            if has_sandwich_h {
+                bonus += 1000;
+                let cr = if r1_x > enemy_x { r1_x } else { r2_x }.min(if r2_x > enemy_x {
+                    r2_x
+                } else {
+                    r1_x
+                });
+                let cl = if r1_x < enemy_x { r1_x } else { r2_x }.max(if r2_x < enemy_x {
+                    r2_x
+                } else {
+                    r1_x
+                });
                 let gap = cr - cl - 1;
-                bonus += if gap <= 1 {
-                    160
-                } else if gap <= 2 {
-                    120
-                } else if gap <= 3 {
-                    90
-                } else if gap <= 5 {
-                    60
-                } else {
-                    30
-                };
+                bonus += (8 - gap.min(8) as i32) * 150;
             }
 
-            // Mutual protection
-            let mut protected_count = 0;
-            for i in 0..our_pieces_count {
-                for j in 0..our_pieces_count {
-                    if i != j
-                        && (our_pieces[i].x == our_pieces[j].x
-                            || our_pieces[i].y == our_pieces[j].y)
-                    {
-                        protected_count += 1;
-                        break;
-                    }
-                }
-            }
-            bonus += protected_count as i32 * 40;
-
-            // Fence closeness
-            for i in 0..our_pieces_count {
-                let s = &our_pieces[i];
-                let rank_dist = (s.y - enemy_y).abs();
-                let file_dist = (s.x - enemy_x).abs();
-                if s.y != enemy_y {
-                    bonus += if rank_dist == 1 {
-                        50
-                    } else if rank_dist == 2 {
-                        36
-                    } else if rank_dist <= 4 {
-                        24
+            // ========== 3. FENCE QUALITY ==========
+            for r in &[(r1_x, r1_y), (r2_x, r2_y)] {
+                let rd = (r.1 - enemy_y).abs();
+                let fd = (r.0 - enemy_x).abs();
+                if rd > 0 {
+                    bonus += if rd == 1 {
+                        400
+                    } else if rd == 2 {
+                        250
                     } else {
-                        8
+                        50
                     };
                 }
-                if s.x != enemy_x {
-                    bonus += if file_dist == 1 {
-                        50
-                    } else if file_dist == 2 {
-                        36
-                    } else if file_dist <= 4 {
-                        24
+                if fd > 0 {
+                    bonus += if fd == 1 {
+                        400
+                    } else if fd == 2 {
+                        250
                     } else {
-                        8
+                        50
                     };
                 }
             }
 
-            // RUN calculations
-            let run_up = closest_above.map(|f| f - enemy_y - 1).unwrap_or(100);
-            let run_down = closest_below.map(|f| enemy_y - f - 1).unwrap_or(100);
-            let run_right = closest_right.map(|f| f - enemy_x - 1).unwrap_or(100);
-            let run_left = closest_left.map(|f| enemy_x - f - 1).unwrap_or(100);
+            // ========== 4. KING APPROACH (DOMINANT) ==========
+            if let Some(ok) = our_king {
+                // MASSIVE approach bonus
+                bonus += (100 - king_dist.min(100) as i32) * 100;
 
-            const RUN_GRACE: i64 = 2;
-            let run_away_h = if our_dx > 0 {
-                run_left
-            } else if our_dx < 0 {
-                run_right
-            } else {
-                run_left.max(run_right)
-            };
-            let run_away_v = if our_dy > 0 {
-                run_down
-            } else if our_dy < 0 {
-                run_up
-            } else {
-                run_up.max(run_down)
-            };
-            let enemy_can_run_away = run_away_h > RUN_GRACE || run_away_v > RUN_GRACE;
-
-            let rooks_protected =
-                protected_count >= 2 || (protected_count >= 1 && our_pieces_count >= 2);
-            let should_approach =
-                !enemy_can_run_away || rooks_protected || has_sand_h || has_sand_v;
-
-            if should_approach {
-                let prox = (30 - king_dist.min(30)) as i32;
-                bonus += prox * 10;
-                let dx_abs = our_dx.abs();
-                let dy_abs = our_dy.abs();
-                if dx_abs <= 2 && dy_abs <= 2 {
-                    bonus += 40;
-                }
-                if dx_abs <= 1 && dy_abs <= 1 && (dx_abs + dy_abs) > 0 {
-                    bonus += 20;
+                if king_dist <= 2 {
+                    bonus += 3000;
+                } else if king_dist <= 4 {
+                    bonus += 1500;
                 }
 
-                // 2R+K HARDCODE: Approach from the SIDE (where a rook is), NOT from the front.
-                // If we have a horizontal sandwich, approach vertically (from above/below rook line).
-                // If we have a vertical sandwich, approach horizontally (from left/right of rook line).
-                if let Some(ok) = our_king {
-                    if has_sand_h && !has_sand_v {
-                        // Rooks sandwich horizontally - king should be on same rank as a rook
-                        for i in 0..our_pieces_count {
-                            if our_pieces[i].y == ok.y {
-                                bonus += 80;
-                            }
-                        }
-                        if ok.x == enemy_x {
-                            bonus -= 60;
-                        }
-                    } else if has_sand_v && !has_sand_h {
-                        // Rooks sandwich vertically - king should be on same file as a rook
-                        for i in 0..our_pieces_count {
-                            if our_pieces[i].x == ok.x {
-                                bonus += 80;
-                            }
-                        }
-                        if ok.y == enemy_y {
-                            bonus -= 60;
-                        }
-                    } else if has_sand_h && has_sand_v {
-                        bonus += 100;
-                    }
-                } else if has_sand_h && has_sand_v {
-                    // Full box - just get close, doesn't matter from where
-                    bonus += 100;
+                let our_dx = ok.x - enemy_x;
+                let our_dy = ok.y - enemy_y;
+
+                // CUT OFF FROM OPPOSITE SIDE
+                if our_dx > 0 && has_rook_left {
+                    bonus += 1200;
                 }
-            } else {
-                let prox = (20 - king_dist.min(20)) as i32;
-                bonus += prox * 1;
+                if our_dx < 0 && has_rook_right {
+                    bonus += 1200;
+                }
+                if our_dy > 0 && has_rook_below {
+                    bonus += 1200;
+                }
+                if our_dy < 0 && has_rook_above {
+                    bonus += 1200;
+                }
+
+                // OPPOSITION
+                if has_sandwich_v && our_dy.abs() <= 1 {
+                    bonus += 1000;
+                }
+                if has_sandwich_h && our_dx.abs() <= 1 {
+                    bonus += 1000;
+                }
+
+                // Don't block our own rooks!
+                if (rooks_on_same_rank && ok.y == r1_y) || (rooks_on_same_file && ok.x == r1_x) {
+                    bonus -= 1500;
+                }
+            }
+
+            // Full box bonus
+            if has_sandwich_v && has_sandwich_h {
+                bonus += 2000;
             }
         } else {
             // CASE B: TECHNICAL/SPARSE - Use technical Ladders/Sandwiches.
