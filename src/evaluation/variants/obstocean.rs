@@ -23,10 +23,10 @@ fn evaluate_inner(game: &GameState) -> i32 {
 
     // Mop-up
     if let Some(_) = crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::Black) {
-        if let (Some(w), Some(b)) = (&wk, &bk) {
+        if let Some(b) = &bk {
             score += crate::evaluation::mop_up::evaluate_mop_up_scaled(
                 game,
-                w,
+                wk.as_ref(),
                 b,
                 PlayerColor::White,
                 PlayerColor::Black,
@@ -35,10 +35,10 @@ fn evaluate_inner(game: &GameState) -> i32 {
     } else if let Some(_) =
         crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::White)
     {
-        if let (Some(w), Some(b)) = (&wk, &bk) {
+        if let Some(w) = &wk {
             score -= crate::evaluation::mop_up::evaluate_mop_up_scaled(
                 game,
-                b,
+                bk.as_ref(),
                 w,
                 PlayerColor::Black,
                 PlayerColor::White,

@@ -376,13 +376,11 @@ fn evaluate_inner(game: &GameState) -> i32 {
     if let Some(_scale) =
         crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::Black)
     {
-        // Use whichever king(s) exist - we need at least the enemy king
+        // Need enemy king as target
         if let Some(bk) = &black_king {
-            // Black king exists - this is the target
-            let wk_coord = white_king.as_ref().unwrap_or(bk); // Use black king pos if no white king
             score += crate::evaluation::mop_up::evaluate_mop_up_scaled(
                 game,
-                wk_coord,
+                white_king.as_ref(),
                 bk,
                 PlayerColor::White,
                 PlayerColor::Black,
@@ -396,13 +394,11 @@ fn evaluate_inner(game: &GameState) -> i32 {
         if let Some(_scale) =
             crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::White)
         {
-            // Use whichever king(s) exist - we need at least the enemy king
+            // Need enemy king as target
             if let Some(wk) = &white_king {
-                // White king exists - this is the target
-                let bk_coord = black_king.as_ref().unwrap_or(wk); // Use white king pos if no black king
                 score -= crate::evaluation::mop_up::evaluate_mop_up_scaled(
                     game,
-                    bk_coord,
+                    black_king.as_ref(),
                     wk,
                     PlayerColor::Black,
                     PlayerColor::White,
@@ -419,19 +415,18 @@ fn evaluate_inner(game: &GameState) -> i32 {
         score += evaluate_pawn_structure(game);
     }
 
-    // Add strong pawn advancement bonus when opponent has few pieces.
-    // This ensures pawn pushing is prioritized regardless of mop-up trigger.
-    // Scale based on opponent non-pawn pieces: lone king = full bonus, more pieces = reduced
-    let white_non_pawn = game.white_piece_count.saturating_sub(game.white_pawn_count);
-    let black_non_pawn = game.black_piece_count.saturating_sub(game.black_pawn_count);
+    // Pawn advancement bonus for endgame (opponent has under 3 pieces)
+    // Helps prioritize pawn promotion when mop-up doesn't apply
+    let white_pieces = game.white_piece_count.saturating_sub(game.white_pawn_count);
+    let black_pieces = game.black_piece_count.saturating_sub(game.black_pawn_count);
 
-    if game.white_pawn_count > 0 && black_non_pawn <= 3 {
-        // White has pawns and Black has few pieces - bonus for White pawn advancement
-        score += evaluate_pawn_advancement_bonus(game, PlayerColor::White, black_non_pawn.into());
+    // White's pawn advancement bonus (when black has few pieces)
+    if black_pieces < 3 && game.white_pawn_count > 0 {
+        score += evaluate_pawn_advancement_endgame(game, PlayerColor::White);
     }
-    if game.black_pawn_count > 0 && white_non_pawn <= 3 {
-        // Black has pawns and White has few pieces - bonus for Black pawn advancement
-        score -= evaluate_pawn_advancement_bonus(game, PlayerColor::Black, white_non_pawn.into());
+    // Black's pawn advancement bonus (when white has few pieces)
+    if white_pieces < 3 && game.black_pawn_count > 0 {
+        score -= evaluate_pawn_advancement_endgame(game, PlayerColor::Black);
     }
 
     // Return from current player's perspective
@@ -1187,81 +1182,48 @@ pub fn evaluate_pawn_position(
     bonus
 }
 
-// ==================== Pawn Advancement Bonus ====================
-
-/// Calculate massive bonus for pawns close to promotion.
-/// Used when opponent has few pieces to ensure pawn pushing is prioritized.
-/// opponent_pieces: number of non-pawn pieces opponent has (1 = lone king)
-fn evaluate_pawn_advancement_bonus(
-    game: &GameState,
-    color: PlayerColor,
-    opponent_pieces: u32,
-) -> i32 {
+/// Evaluate pawn advancement bonus for endgame positions
+/// Called when opponent has under 3 pieces to prioritize promotion
+fn evaluate_pawn_advancement_endgame(game: &GameState, color: PlayerColor) -> i32 {
     let mut bonus: i32 = 0;
     let is_white = color == PlayerColor::White;
-
     let promo_rank = if is_white {
         game.white_promo_rank
     } else {
         game.black_promo_rank
     };
 
-    // Iterate pawns of specified color
-    for (_cx, cy, tile) in game.board.tiles.iter() {
-        let pawn_mask = tile.occ_pawns
-            & if is_white {
-                tile.occ_white
-            } else {
-                tile.occ_black
-            };
-        if pawn_mask == 0 {
+    for (_x, y, piece) in game.board.iter_pieces_by_color(is_white) {
+        if piece.piece_type() != PieceType::Pawn {
             continue;
         }
 
-        let mut bits = pawn_mask;
-        while bits != 0 {
-            let idx = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            let y = cy * 8 + (idx / 8) as i64;
+        let dist = if is_white {
+            (promo_rank - y).max(0)
+        } else {
+            (y - promo_rank).max(0)
+        };
 
-            // Calculate distance to promotion
-            let dist = if is_white {
-                (promo_rank - y).max(0)
-            } else {
-                (y - promo_rank).max(0)
-            };
-
-            // MASSIVE bonus inversely proportional to distance
-            // Base = 2000, plus up to 3000 more when close
-            let base_bonus = 2000;
-            let distance_bonus = if dist <= 1 {
-                3000 // About to promote: +5000 total
-            } else if dist <= 2 {
-                2500 // Two away: +4500 total  
-            } else if dist <= 3 {
-                2000 // Three away: +4000 total
-            } else if dist <= 5 {
-                1500 // Close: +3500 total
-            } else if dist <= 8 {
-                1000 // Medium: +3000 total
-            } else {
-                500 // Far: +2500 total
-            };
-            bonus += base_bonus + distance_bonus;
+        // Skip pawns past promotion rank
+        if dist < 0 {
+            continue;
         }
+
+        // MASSIVE bonus that scales with advancement
+        // Each step closer = +200 bonus, so pushing is always best
+        // Dist 7 = 600, Dist 6 = 800, Dist 5 = 1000, etc.
+        let pawn_bonus = if dist <= 1 {
+            2500 // About to promote - HUGE
+        } else if dist <= 2 {
+            2000 // Two away
+        } else {
+            // Linear: 200 per step closer, base of (10-dist)*200
+            ((10 - dist.min(10)) as i32) * 200
+        };
+        bonus += pawn_bonus;
     }
 
-    // Scale based on opponent pieces: lone king = 100%, more pieces = reduced
-    // opponent_pieces = 1 (lone king) -> scale = 100%
-    // opponent_pieces = 2 -> scale = 60%
-    // opponent_pieces >= 3 -> scale = 30%
-    let scale_percent = match opponent_pieces {
-        0 | 1 => 100, // Lone king or no king (editor positions)
-        2 => 60,      // King + 1 piece
-        _ => 30,      // King + 2+ pieces
-    };
-
-    (bonus * scale_percent) / 100
+    bonus
 }
 
 // ==================== Fairy Piece Evaluation ====================

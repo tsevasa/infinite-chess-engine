@@ -134,10 +134,12 @@ pub fn is_lone_king(game: &GameState, color: PlayerColor) -> bool {
 }
 
 /// Check if a side has any pawn that can still promote
+/// Uses bitboard for fast pawn-only iteration
 #[inline(always)]
 pub fn has_promotable_pawn(board: &Board, color: PlayerColor, promo_rank: i64) -> bool {
     let is_white = color == PlayerColor::White;
     for (_cx, cy, tile) in board.tiles.iter() {
+        // Fast bitboard check: only look at pawns of this color
         let color_pawns = tile.occ_pawns
             & if is_white {
                 tile.occ_white
@@ -147,6 +149,7 @@ pub fn has_promotable_pawn(board: &Board, color: PlayerColor, promo_rank: i64) -
         if color_pawns == 0 {
             continue;
         }
+        // Check if ANY pawn in this tile can promote
         let mut bits = color_pawns;
         while bits != 0 {
             let idx = bits.trailing_zeros() as usize;
@@ -169,6 +172,7 @@ pub fn has_promotable_pawn(board: &Board, color: PlayerColor, promo_rank: i64) -
 /// Calculate mop-up scaling factor (0-100). Returns None if:
 /// - Opponent has >= 20% of starting non-pawn pieces
 /// - Winning side has no non-pawn pieces (only king/pawns)
+/// Returns 10 (10% scale) if winning side has promotable pawns
 #[inline(always)]
 pub fn calculate_mop_up_scale(game: &GameState, losing_color: PlayerColor) -> Option<u32> {
     // Count NON-PAWN pieces only (excluding king)
@@ -196,8 +200,26 @@ pub fn calculate_mop_up_scale(game: &GameState, losing_color: PlayerColor) -> Op
         return None; // Don't mop-up with just king+pawns
     }
 
+    // Check if winning side has promotable pawns - reduce scale to prioritize pawn advancement
+    let winning_color = if losing_color == PlayerColor::White {
+        PlayerColor::Black
+    } else {
+        PlayerColor::White
+    };
+    let (pawn_count, promo_rank) = if winning_color == PlayerColor::White {
+        (game.white_pawn_count, game.white_promo_rank)
+    } else {
+        (game.black_pawn_count, game.black_promo_rank)
+    };
+    let has_promo_pawn =
+        pawn_count > 0 && has_promotable_pawn(&game.board, winning_color, promo_rank);
+
     if losing_pieces == 0 {
-        return Some(100); // Lone king (or king+pawns only) = full mop-up
+        // Lone king - but reduce scale if winning side has promotable pawns
+        if has_promo_pawn {
+            return None;
+        }
+        return Some(100); // Full mop-up
     }
 
     if losing_starting == 0 {
@@ -216,10 +238,11 @@ pub fn calculate_mop_up_scale(game: &GameState, losing_color: PlayerColor) -> Op
 }
 
 /// Legacy entry point - unscaled evaluation
+/// our_king can be None for checkmate practice positions
 #[inline(always)]
 pub fn evaluate_lone_king_endgame(
     game: &GameState,
-    our_king: &Coordinate,
+    our_king: Option<&Coordinate>,
     enemy_king: &Coordinate,
     winning_color: PlayerColor,
 ) -> i32 {
@@ -227,10 +250,11 @@ pub fn evaluate_lone_king_endgame(
 }
 
 /// Scaled mop-up evaluation - main entry point
+/// our_king can be None for checkmate practice positions
 #[inline(always)]
 pub fn evaluate_mop_up_scaled(
     game: &GameState,
-    our_king: &Coordinate,
+    our_king: Option<&Coordinate>,
     enemy_king: &Coordinate,
     winning_color: PlayerColor,
     losing_color: PlayerColor,
@@ -247,17 +271,24 @@ pub fn evaluate_mop_up_scaled(
 // ==================== Core Evaluation ====================
 
 /// Core mop-up evaluation - no allocations, minimal branching
+/// our_king can be None for checkmate practice positions
 #[inline(always)]
 fn evaluate_mop_up_core(
     game: &GameState,
-    our_king: &Coordinate,
+    our_king: Option<&Coordinate>,
     enemy_king: &Coordinate,
     winning_color: PlayerColor,
 ) -> i32 {
     let mut bonus: i32 = 0;
-    let our_dx = our_king.x - enemy_king.x;
-    let our_dy = our_king.y - enemy_king.y;
-    let king_dist = our_dx.abs().max(our_dy.abs()); // Chebyshev distance
+
+    // When our_king is None, king approach bonuses will be 0
+    let (our_dx, our_dy, king_dist) = if let Some(ok) = our_king {
+        let dx = ok.x - enemy_king.x;
+        let dy = ok.y - enemy_king.y;
+        (dx, dy, dx.abs().max(dy.abs()))
+    } else {
+        (0, 0, i64::MAX) // No king = no approach bonus
+    };
 
     // Track closest fences in each direction using scalar min/max
     let mut ortho_y_min_above: i64 = i64::MAX;
@@ -293,11 +324,12 @@ fn evaluate_mop_up_core(
     let enemy_diag_pos = enemy_x + enemy_y;
     let enemy_diag_neg = enemy_x - enemy_y;
 
-    // Single pass - collect fence positions and short-range bonuses
+    // Single pass variables
     let is_white = winning_color == PlayerColor::White;
     for (x, y, piece) in game.board.iter_pieces_by_color(is_white) {
         let pt = piece.piece_type();
-        if pt.is_royal() || pt == PieceType::Pawn {
+
+        if pt.is_royal() {
             continue;
         }
 
@@ -409,13 +441,15 @@ fn evaluate_mop_up_core(
         // Diagonals Back Side
         let pdp = x + y - enemy_diag_pos;
         let pdn = x - y - enemy_diag_neg;
-        let our_dp = our_king.x + our_king.y - enemy_diag_pos;
-        let our_dn = our_king.x - our_king.y - enemy_diag_neg;
-        if (our_dp > 0 && pdp < 0) || (our_dp < 0 && pdp > 0) {
-            bonus += 200;
-        }
-        if (our_dn > 0 && pdn < 0) || (our_dn < 0 && pdn > 0) {
-            bonus += 200;
+        if let Some(ok) = our_king {
+            let our_dp = ok.x + ok.y - enemy_diag_pos;
+            let our_dn = ok.x - ok.y - enemy_diag_neg;
+            if (our_dp > 0 && pdp < 0) || (our_dp < 0 && pdp > 0) {
+                bonus += 200;
+            }
+            if (our_dn > 0 && pdn < 0) || (our_dn < 0 && pdn > 0) {
+                bonus += 200;
+            }
         }
 
         // Check Detection & Directional Penalty
@@ -541,11 +575,14 @@ fn evaluate_mop_up_core(
 
             // Continuous King Approach Gradient
             // CRITICAL: We want the king to approach EVEN IF not caged yet
-            let king_approach_bonus = (100 - king_dist.min(100) as i32) * 60; // Increased to 60
+            // B+Q+K vs K and similar: King MUST approach aggressively
+            let king_approach_bonus = (100 - king_dist.min(100) as i32) * 80; // Increased to 80 for aggressive hunting
             bonus += king_approach_bonus;
 
             if king_dist <= 2 {
-                bonus += 500;
+                bonus += 800; // Huge bonus for being adjacent
+            } else if king_dist <= 4 {
+                bonus += 400; // Good bonus for being close
             }
 
             // ALL PIECES should approach once caged - add unified approach bonuses
@@ -569,8 +606,10 @@ fn evaluate_mop_up_core(
 
                 // TEAMWORK: Reward pieces for staying within semi-reasonable range of our king
                 // This prevents the "Amazon in corner, King in other corner" drift.
-                let king_piece_dist = (s.x - our_king.x).abs().max((s.y - our_king.y).abs());
-                bonus += (60 - king_piece_dist.min(60) as i32) * 15;
+                if let Some(ok) = our_king {
+                    let king_piece_dist = (s.x - ok.x).abs().max((s.y - ok.y).abs());
+                    bonus += (60 - king_piece_dist.min(60) as i32) * 15;
+                }
             }
         } else if ortho_count == 2
             && diag_count == 0
@@ -718,6 +757,38 @@ fn evaluate_mop_up_core(
                 }
                 if dx_abs <= 1 && dy_abs <= 1 && (dx_abs + dy_abs) > 0 {
                     bonus += 100;
+                }
+
+                // 2R+K HARDCODE: Approach from the SIDE (where a rook is), NOT from the front.
+                // If we have a horizontal sandwich, approach vertically (from above/below rook line).
+                // If we have a vertical sandwich, approach horizontally (from left/right of rook line).
+                if let Some(ok) = our_king {
+                    if has_sand_h && !has_sand_v {
+                        // Rooks sandwich horizontally - king should be on same rank as a rook
+                        for i in 0..our_pieces_count {
+                            if our_pieces[i].y == ok.y {
+                                bonus += 400;
+                            }
+                        }
+                        if ok.x == enemy_x {
+                            bonus -= 300;
+                        }
+                    } else if has_sand_v && !has_sand_h {
+                        // Rooks sandwich vertically - king should be on same file as a rook
+                        for i in 0..our_pieces_count {
+                            if our_pieces[i].x == ok.x {
+                                bonus += 400;
+                            }
+                        }
+                        if ok.y == enemy_y {
+                            bonus -= 300;
+                        }
+                    } else if has_sand_h && has_sand_v {
+                        bonus += 500;
+                    }
+                } else if has_sand_h && has_sand_v {
+                    // Full box - just get close, doesn't matter from where
+                    bonus += 500;
                 }
             } else {
                 let prox = (20 - king_dist.min(20)) as i32;
@@ -881,12 +952,14 @@ fn evaluate_mop_up_core(
             for i in 0..our_pieces_count {
                 let s = &our_pieces[i];
                 let dist = (s.x - enemy_x).abs().max((s.y - enemy_y).abs());
-                let king_piece_dist = (s.x - our_king.x).abs().max((s.y - our_king.y).abs());
 
                 // Pieces approach even in technical branch
                 bonus += (80 - dist.min(80) as i32) * 20;
-                // Pieces stay with king
-                bonus += (50 - king_piece_dist.min(50) as i32) * 12;
+                // Pieces stay with king (only if we have a king)
+                if let Some(ok) = our_king {
+                    let king_piece_dist = (s.x - ok.x).abs().max((s.y - ok.y).abs());
+                    bonus += (50 - king_piece_dist.min(50) as i32) * 12;
+                }
             }
 
             if is_contained {
