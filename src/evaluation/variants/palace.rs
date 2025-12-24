@@ -171,3 +171,125 @@ fn can_attack(game: &GameState, from: Coordinate, to: Coordinate, ptype: PieceTy
 
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Board, Piece};
+    use crate::game::GameState;
+
+    fn create_palace_game() -> GameState {
+        let mut game = GameState::new();
+        game.board = Board::new();
+        game.variant = Some(crate::Variant::Palace);
+        game
+    }
+
+    #[test]
+    fn test_is_heavy_piece() {
+        assert!(is_heavy_piece(PieceType::Queen));
+        assert!(is_heavy_piece(PieceType::Amazon));
+        assert!(is_heavy_piece(PieceType::Chancellor));
+        assert!(is_heavy_piece(PieceType::Archbishop));
+        assert!(!is_heavy_piece(PieceType::Rook));
+        assert!(!is_heavy_piece(PieceType::Knight));
+        assert!(!is_heavy_piece(PieceType::Bishop));
+        assert!(!is_heavy_piece(PieceType::Pawn));
+    }
+
+    #[test]
+    fn test_evaluate_returns_value() {
+        let mut game = create_palace_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        let score = evaluate(&game);
+        assert!(score.abs() < 10000, "K vs K should be near 0");
+    }
+
+    #[test]
+    fn test_heavy_piece_advance_bonus() {
+        let mut game = create_palace_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // Queen advanced to y=5
+        game.board
+            .set_piece(4, 5, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+
+        let score_advanced = evaluate(&game);
+
+        // Queen on back rank
+        game.board.remove_piece(&4, &5);
+        game.board
+            .set_piece(4, 1, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.recompute_piece_counts();
+
+        let score_back = evaluate(&game);
+
+        // Advanced queen should score better
+        assert!(
+            score_advanced > score_back,
+            "Advanced heavy piece should score better"
+        );
+    }
+
+    #[test]
+    fn test_can_attack_knight_jump() {
+        let game = create_palace_game();
+        let from = Coordinate::new(4, 4);
+        let to = Coordinate::new(5, 6); // Knight jump
+
+        assert!(can_attack(&game, from, to, PieceType::Amazon));
+        assert!(can_attack(&game, from, to, PieceType::Knight));
+        assert!(!can_attack(&game, from, to, PieceType::Queen));
+    }
+
+    #[test]
+    fn test_can_attack_diagonal() {
+        let game = create_palace_game();
+        let from = Coordinate::new(4, 4);
+        let to = Coordinate::new(6, 6); // Diagonal
+
+        assert!(can_attack(&game, from, to, PieceType::Queen));
+        assert!(can_attack(&game, from, to, PieceType::Bishop));
+        assert!(!can_attack(&game, from, to, PieceType::Rook));
+    }
+
+    #[test]
+    fn test_can_attack_orthogonal() {
+        let game = create_palace_game();
+        let from = Coordinate::new(4, 4);
+        let to = Coordinate::new(4, 7); // Vertical
+
+        assert!(can_attack(&game, from, to, PieceType::Queen));
+        assert!(can_attack(&game, from, to, PieceType::Rook));
+        assert!(!can_attack(&game, from, to, PieceType::Bishop));
+    }
+
+    #[test]
+    fn test_amazon_aggression_bonus() {
+        let mut game = create_palace_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // Amazon in aggressive central position
+        game.board
+            .set_piece(4, 5, Piece::new(PieceType::Amazon, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+
+        let score = evaluate(&game);
+        // Should be positive (white advantage with Amazon)
+        assert!(score > 0, "Amazon should give positive eval");
+    }
+}

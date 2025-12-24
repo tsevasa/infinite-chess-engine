@@ -1,3 +1,7 @@
+//! Noisy search module - adds stochastic noise to evaluation for SPRT testing.
+//! This module largely mirrors search.rs with noise injection.
+//! Coverage exclusion is handled via CI ignore flags.
+
 use super::params;
 use super::*;
 use crate::evaluation::evaluate;

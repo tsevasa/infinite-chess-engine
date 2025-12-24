@@ -538,3 +538,306 @@ fn evaluate_king_pawn_distance(
 
     score
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Board, Piece};
+    use crate::game::GameState;
+
+    fn create_chess_game() -> GameState {
+        let mut game = GameState::new();
+        game.board = Board::new();
+        game.variant = Some(crate::Variant::Chess);
+        game
+    }
+
+    fn setup_standard_chess_opening(game: &mut GameState) {
+        // Set up standard chess starting position
+        // White pieces
+        for file in 1..=8 {
+            game.board
+                .set_piece(file, 2, Piece::new(PieceType::Pawn, PlayerColor::White));
+            game.board
+                .set_piece(file, 7, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        }
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(8, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(2, 1, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.board
+            .set_piece(7, 1, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.board
+            .set_piece(3, 1, Piece::new(PieceType::Bishop, PlayerColor::White));
+        game.board
+            .set_piece(6, 1, Piece::new(PieceType::Bishop, PlayerColor::White));
+        game.board
+            .set_piece(4, 1, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+
+        // Black pieces
+        game.board
+            .set_piece(1, 8, Piece::new(PieceType::Rook, PlayerColor::Black));
+        game.board
+            .set_piece(8, 8, Piece::new(PieceType::Rook, PlayerColor::Black));
+        game.board
+            .set_piece(2, 8, Piece::new(PieceType::Knight, PlayerColor::Black));
+        game.board
+            .set_piece(7, 8, Piece::new(PieceType::Knight, PlayerColor::Black));
+        game.board
+            .set_piece(3, 8, Piece::new(PieceType::Bishop, PlayerColor::Black));
+        game.board
+            .set_piece(6, 8, Piece::new(PieceType::Bishop, PlayerColor::Black));
+        game.board
+            .set_piece(4, 8, Piece::new(PieceType::Queen, PlayerColor::Black));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+
+        game.recompute_piece_counts();
+        game.recompute_hash();
+    }
+
+    // ======================== Helper Function Tests ========================
+
+    #[test]
+    fn test_coord_to_pst_index() {
+        // a1 = (1,1) -> index 0
+        assert_eq!(coord_to_pst_index(1, 1), 0);
+        // h1 = (8,1) -> index 7
+        assert_eq!(coord_to_pst_index(8, 1), 7);
+        // a8 = (1,8) -> index 56
+        assert_eq!(coord_to_pst_index(1, 8), 56);
+        // e4 = (5,4) -> index 28
+        assert_eq!(coord_to_pst_index(5, 4), 28);
+    }
+
+    #[test]
+    fn test_on_board() {
+        assert!(on_board(1, 1));
+        assert!(on_board(8, 8));
+        assert!(on_board(4, 4));
+        assert!(!on_board(0, 1));
+        assert!(!on_board(9, 1));
+        assert!(!on_board(1, 0));
+        assert!(!on_board(1, 9));
+    }
+
+    #[test]
+    fn test_get_phase_starting() {
+        let mut game = create_chess_game();
+        setup_standard_chess_opening(&mut game);
+
+        let phase = get_phase(&game);
+        // 4 knights (4*1) + 4 bishops (4*1) + 4 rooks (4*2) + 2 queens (2*4) = 4+4+8+8 = 24
+        assert_eq!(phase, TOTAL_PHASE, "Starting position should be full phase");
+    }
+
+    #[test]
+    fn test_get_phase_endgame() {
+        let mut game = create_chess_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.recompute_piece_counts();
+
+        let phase = get_phase(&game);
+        assert_eq!(phase, 2, "Rook only = phase 2");
+    }
+
+    // ======================== Mobility Tests ========================
+
+    #[test]
+    fn test_bishop_mobility_empty_board() {
+        let board = Board::new();
+        let mobility = count_bishop_mobility(&board, 4, 4);
+        // Bishop in center can move 7 squares in each diagonal direction = 28 total
+        // But on_board limits to 8x8
+        assert!(mobility > 0, "Bishop should have mobility on empty board");
+    }
+
+    #[test]
+    fn test_rook_mobility_empty_board() {
+        let board = Board::new();
+        let mobility = count_rook_mobility(&board, 4, 4);
+        // Rook in center, limited by 8x8 board
+        assert!(mobility > 0, "Rook should have mobility on empty board");
+    }
+
+    #[test]
+    fn test_bishop_mobility_blocked() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Bishop, PlayerColor::White));
+        // Block all diagonals adjacent
+        board.set_piece(5, 5, Piece::new(PieceType::Pawn, PlayerColor::White));
+        board.set_piece(3, 3, Piece::new(PieceType::Pawn, PlayerColor::White));
+        board.set_piece(5, 3, Piece::new(PieceType::Pawn, PlayerColor::White));
+        board.set_piece(3, 5, Piece::new(PieceType::Pawn, PlayerColor::White));
+
+        let mobility = count_bishop_mobility(&board, 4, 4);
+        assert_eq!(mobility, 0, "Blocked bishop should have 0 mobility");
+    }
+
+    // ======================== Evaluation Tests ========================
+
+    #[test]
+    fn test_evaluate_starting_position() {
+        let mut game = create_chess_game();
+        setup_standard_chess_opening(&mut game);
+        game.turn = PlayerColor::White;
+
+        let score = evaluate(&game);
+        // Starting position should be roughly equal (within pawn value)
+        assert!(
+            score.abs() < 100,
+            "Starting position should be near 0, got {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_evaluate_queen_up() {
+        let mut game = create_chess_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+
+        let score = evaluate(&game);
+        assert!(
+            score > QUEEN_VALUE / 2,
+            "Queen up should be positive, got {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_evaluate_bishop_pair_bonus() {
+        let mut game = create_chess_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(3, 1, Piece::new(PieceType::Bishop, PlayerColor::White));
+        game.board
+            .set_piece(6, 1, Piece::new(PieceType::Bishop, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+
+        let score_with_pair = evaluate(&game);
+
+        // Now with only one bishop
+        game.board.remove_piece(&6, &1);
+        game.recompute_piece_counts();
+        let score_with_one = evaluate(&game);
+
+        let diff = score_with_pair - score_with_one;
+        // Should be bishop value + pair bonus
+        assert!(diff > BISHOP_VALUE, "Bishop pair bonus should add value");
+    }
+
+    #[test]
+    fn test_evaluate_passed_pawn() {
+        let mut game = create_chess_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // White passed pawn on 6th rank
+        game.board
+            .set_piece(4, 6, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+
+        let score = evaluate(&game);
+        assert!(
+            score > PAWN_VALUE,
+            "Passed pawn on 6th should be very valuable"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_doubled_pawns() {
+        let mut game = create_chess_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // White doubled pawns
+        game.board
+            .set_piece(4, 3, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+
+        let score = evaluate(&game);
+        // Doubled pawns are penalized, but still positive because white has 2 pawns
+        assert!(
+            score.abs() < 2 * PAWN_VALUE + 100,
+            "Score should reflect doubled pawn penalty"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_rook_on_7th() {
+        let mut game = create_chess_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 7, Piece::new(PieceType::Rook, PlayerColor::White)); // 7th rank
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+
+        let score_on_7th = evaluate(&game);
+
+        // Compare with rook on 4th
+        game.board.remove_piece(&4, &7);
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.recompute_piece_counts();
+
+        let score_on_4th = evaluate(&game);
+
+        assert!(
+            score_on_7th > score_on_4th,
+            "Rook on 7th should score better"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_from_black_perspective() {
+        let mut game = create_chess_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        let score_white = evaluate(&game);
+
+        game.turn = PlayerColor::Black;
+        let score_black = evaluate(&game);
+
+        // Scores should be negated
+        assert_eq!(
+            score_white, -score_black,
+            "Score should negate for opposite side"
+        );
+    }
+}

@@ -967,4 +967,182 @@ mod tests {
         // (-1,-1) is in tile (-1,-1)
         assert!(table.get_tile(-1, -1).is_some());
     }
+
+    #[test]
+    fn test_tile_table_iteration() {
+        let mut table = TileTable::new();
+        table
+            .get_or_create(0, 0)
+            .set_piece(0, Piece::new(PieceType::King, PlayerColor::White));
+        table
+            .get_or_create(1, 1)
+            .set_piece(0, Piece::new(PieceType::Queen, PlayerColor::Black));
+
+        let count = table.iter().count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_tile_table_iter_all_pieces() {
+        let mut table = TileTable::new();
+        table
+            .get_or_create(0, 0)
+            .set_piece(0, Piece::new(PieceType::King, PlayerColor::White));
+        table
+            .get_or_create(0, 0)
+            .set_piece(1, Piece::new(PieceType::Queen, PlayerColor::White));
+        table
+            .get_or_create(1, 0)
+            .set_piece(0, Piece::new(PieceType::Knight, PlayerColor::Black));
+
+        let count = table.iter_all_pieces().count();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_tile_table_iter_pieces_by_color() {
+        let mut table = TileTable::new();
+        table
+            .get_or_create(0, 0)
+            .set_piece(0, Piece::new(PieceType::King, PlayerColor::White));
+        table
+            .get_or_create(0, 0)
+            .set_piece(1, Piece::new(PieceType::Queen, PlayerColor::White));
+        table
+            .get_or_create(1, 0)
+            .set_piece(0, Piece::new(PieceType::Knight, PlayerColor::Black));
+
+        let white_count = table.iter_pieces_by_color(true).count();
+        let black_count = table.iter_pieces_by_color(false).count();
+        assert_eq!(white_count, 2);
+        assert_eq!(black_count, 1);
+    }
+
+    #[test]
+    fn test_tile_piece_iteration() {
+        let mut tile = Tile::new();
+        tile.set_piece(0, Piece::new(PieceType::Pawn, PlayerColor::White));
+        tile.set_piece(7, Piece::new(PieceType::Pawn, PlayerColor::White));
+        tile.set_piece(63, Piece::new(PieceType::Rook, PlayerColor::Black));
+
+        let count = tile.iter_pieces().count();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_tile_occupancy_for_color() {
+        let mut tile = Tile::new();
+        tile.set_piece(0, Piece::new(PieceType::Pawn, PlayerColor::White));
+        tile.set_piece(1, Piece::new(PieceType::Knight, PlayerColor::Black));
+        tile.set_piece(2, Piece::new(PieceType::Void, PlayerColor::Neutral));
+
+        assert!(tile.occ_for_color(PlayerColor::White) & 1 != 0);
+        assert!(tile.occ_for_color(PlayerColor::Black) & 2 != 0);
+        assert!(tile.occ_for_color(PlayerColor::Neutral) & 4 != 0);
+    }
+
+    #[test]
+    fn test_tile_piece_count() {
+        let mut table = TileTable::new();
+        table
+            .get_or_create(0, 0)
+            .set_piece(0, Piece::new(PieceType::King, PlayerColor::White));
+        table
+            .get_or_create(0, 0)
+            .set_piece(1, Piece::new(PieceType::Queen, PlayerColor::White));
+        table
+            .get_or_create(1, 0)
+            .set_piece(0, Piece::new(PieceType::Knight, PlayerColor::Black));
+
+        assert_eq!(table.piece_count(), 3);
+    }
+
+    #[test]
+    fn test_tile_table_remove() {
+        let mut table = TileTable::new();
+        table
+            .get_or_create(0, 0)
+            .set_piece(0, Piece::new(PieceType::King, PlayerColor::White));
+        assert!(table.get_tile(0, 0).is_some());
+
+        table.remove(0, 0);
+        assert!(table.get_tile(0, 0).is_none());
+    }
+
+    #[test]
+    fn test_tile_table_clear() {
+        let mut table = TileTable::new();
+        table
+            .get_or_create(0, 0)
+            .set_piece(0, Piece::new(PieceType::King, PlayerColor::White));
+        table
+            .get_or_create(1, 1)
+            .set_piece(0, Piece::new(PieceType::Queen, PlayerColor::White));
+        assert_eq!(table.len(), 2);
+
+        table.clear();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn test_tile_sum_lx_ly() {
+        let tile = Tile::new();
+        // Set up a test bit pattern
+        let bits = 0b00000011_00000000u64; // Two bits at positions 8 and 9 -> y=1, x=0 and x=1
+        let sum_x = tile.sum_lx(bits);
+        let sum_y = tile.sum_ly(bits);
+        assert_eq!(sum_x, 1); // x=0 + x=1 = 1
+        assert_eq!(sum_y, 2); // y=1 + y=1 = 2
+    }
+
+    #[test]
+    fn test_bit_mask() {
+        assert_eq!(bit_mask(0, 0), 1);
+        assert_eq!(bit_mask(7, 0), 0x80);
+        assert_eq!(bit_mask(0, 7), 1 << 56);
+    }
+
+    #[test]
+    fn test_tile_set_piece_types() {
+        let mut tile = Tile::new();
+
+        // Bishop should set diag_sliders
+        tile.set_piece(0, Piece::new(PieceType::Bishop, PlayerColor::White));
+        assert!(tile.occ_diag_sliders & 1 != 0);
+
+        // Rook should set ortho_sliders
+        tile.set_piece(1, Piece::new(PieceType::Rook, PlayerColor::White));
+        assert!(tile.occ_ortho_sliders & 2 != 0);
+
+        // Queen should set both
+        tile.set_piece(2, Piece::new(PieceType::Queen, PlayerColor::White));
+        assert!(tile.occ_diag_sliders & 4 != 0);
+        assert!(tile.occ_ortho_sliders & 4 != 0);
+
+        // Chancellor sets ortho
+        tile.set_piece(3, Piece::new(PieceType::Chancellor, PlayerColor::White));
+        assert!(tile.occ_ortho_sliders & 8 != 0);
+
+        // Archbishop sets diag
+        tile.set_piece(4, Piece::new(PieceType::Archbishop, PlayerColor::White));
+        assert!(tile.occ_diag_sliders & 16 != 0);
+
+        // Amazon sets both
+        tile.set_piece(5, Piece::new(PieceType::Amazon, PlayerColor::White));
+        assert!(tile.occ_diag_sliders & 32 != 0);
+        assert!(tile.occ_ortho_sliders & 32 != 0);
+    }
+
+    #[test]
+    fn test_tile_get_tile_mut() {
+        let mut table = TileTable::new();
+        table.get_or_create(0, 0);
+
+        let tile = table.get_tile_mut(0, 0);
+        assert!(tile.is_some());
+
+        let tile = table.get_tile_mut(99, 99);
+        assert!(tile.is_none());
+    }
 }

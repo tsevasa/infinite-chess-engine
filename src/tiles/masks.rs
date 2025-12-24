@@ -319,4 +319,111 @@ mod tests {
         assert!(center_mask & (1 << 34) != 0, "White pawn attacks (2, 4)");
         assert!(center_mask & (1 << 36) != 0, "White pawn attacks (4, 4)");
     }
+
+    #[test]
+    fn test_compute_target() {
+        // From center (3, 3), move by (1, 2) -> (4, 5) stays in same tile
+        let result = compute_target(3, 3, 1, 2);
+        assert!(result.is_some());
+        let (tile_dx, tile_dy, local_idx) = result.unwrap();
+        assert_eq!(tile_dx, 0);
+        assert_eq!(tile_dy, 0);
+        assert_eq!(local_idx, 5 * 8 + 4); // local coords (4, 5)
+    }
+
+    #[test]
+    fn test_compute_target_crosses_tile() {
+        // From (7, 7), move by (1, 0) -> (8, 7) goes to tile (1, 0)
+        let result = compute_target(7, 7, 1, 0);
+        assert!(result.is_some());
+        let (tile_dx, tile_dy, _) = result.unwrap();
+        assert_eq!(tile_dx, 1);
+        assert_eq!(tile_dy, 0);
+    }
+
+    #[test]
+    fn test_compute_target_negative() {
+        // From (0, 0), move by (-1, -1) -> (-1, -1) goes to tile (-1, -1)
+        let result = compute_target(0, 0, -1, -1);
+        assert!(result.is_some());
+        let (tile_dx, tile_dy, local_idx) = result.unwrap();
+        assert_eq!(tile_dx, -1);
+        assert_eq!(tile_dy, -1);
+        assert_eq!(local_idx, 7 * 8 + 7); // local coords (7, 7)
+    }
+
+    #[test]
+    fn test_camel_masks() {
+        // Camel from center (3, 3)
+        let from_idx = 27;
+        let mut total_bits = 0;
+        for n in 0..9 {
+            total_bits += CAMEL_MASKS[from_idx][n].count_ones();
+        }
+        assert_eq!(total_bits, 8, "Camel has 8 moves");
+    }
+
+    #[test]
+    fn test_zebra_masks() {
+        // Zebra from center (3, 3)
+        let from_idx = 27;
+        let mut total_bits = 0;
+        for n in 0..9 {
+            total_bits += ZEBRA_MASKS[from_idx][n].count_ones();
+        }
+        assert_eq!(total_bits, 8, "Zebra has 8 moves");
+    }
+
+    #[test]
+    fn test_hawk_masks() {
+        // Hawk from center (3, 3)
+        let from_idx = 27;
+        let mut total_bits = 0;
+        for n in 0..9 {
+            total_bits += HAWK_MASKS[from_idx][n].count_ones();
+        }
+        assert_eq!(total_bits, 16, "Hawk has 16 moves");
+    }
+
+    #[test]
+    fn test_pawn_attacker_masks() {
+        // White pawn attacker masks should be inverse of Black pawn attack masks
+        let white_masks = pawn_attacker_masks(true);
+        let black_masks = pawn_attacker_masks(false);
+
+        // White attackers use BLACK pattern (looking down)
+        assert_eq!(
+            white_masks as *const _,
+            &BLACK_PAWN_ATTACK_MASKS as *const _
+        );
+        // Black attackers use WHITE pattern (looking up)
+        assert_eq!(
+            black_masks as *const _,
+            &WHITE_PAWN_ATTACK_MASKS as *const _
+        );
+    }
+
+    #[test]
+    fn test_all_masks_have_entries() {
+        // Verify all mask lookup tables are properly initialized
+        for from_idx in 0..64 {
+            // Knight should have 8 total moves
+            let mut knight_total = 0;
+            for n in 0..9 {
+                knight_total += KNIGHT_MASKS[from_idx][n].count_ones();
+            }
+            assert_eq!(
+                knight_total, 8,
+                "Knight at {} should have 8 moves",
+                from_idx
+            );
+
+            // King should have 8 total moves
+            let mut king_total = 0;
+            for n in 0..9 {
+                king_total += KING_MASKS[from_idx][n].count_ones();
+            }
+            assert_eq!(king_total, 8, "King at {} should have 8 moves", from_idx);
+        }
+    }
 }

@@ -158,3 +158,117 @@ fn race_eval(game: &GameState) -> i32 {
 
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Board, Piece};
+    use crate::game::GameState;
+
+    fn create_obstocean_game() -> GameState {
+        let mut game = GameState::new();
+        game.board = Board::new();
+        game.variant = Some(crate::Variant::Obstocean);
+        game.white_promo_rank = 8;
+        game.black_promo_rank = 1;
+        game
+    }
+
+    #[test]
+    fn test_evaluate_returns_value() {
+        let mut game = create_obstocean_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        let score = evaluate(&game);
+        assert!(score.abs() < 10000, "K vs K should be near 0");
+    }
+
+    #[test]
+    fn test_edge_pawn_bonus() {
+        let mut game = create_obstocean_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.white_promo_rank = 8;
+        game.recompute_piece_counts();
+
+        // Test eval_pawn directly (avoids mop-up interference)
+        let edge_score = eval_pawn(1, 4, PlayerColor::White, &game);
+        let center_score = eval_pawn(4, 4, PlayerColor::White, &game);
+
+        // Edge pawn should score better (80 vs -40)
+        assert!(
+            edge_score > center_score,
+            "Edge pawn ({}) should score better than center pawn ({})",
+            edge_score,
+            center_score
+        );
+    }
+
+    #[test]
+    fn test_eval_pawn_function() {
+        let mut game = create_obstocean_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.white_promo_rank = 8;
+        game.recompute_piece_counts();
+
+        // Edge file should give big bonus
+        let edge_score = eval_pawn(1, 3, PlayerColor::White, &game);
+        let center_score = eval_pawn(4, 3, PlayerColor::White, &game);
+
+        assert!(edge_score > center_score, "Edge pawn should score higher");
+    }
+
+    #[test]
+    fn test_race_eval_basic() {
+        let mut game = create_obstocean_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // White edge pawn near promotion
+        game.board
+            .set_piece(1, 7, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.white_promo_rank = 8;
+        game.black_promo_rank = 1;
+        game.recompute_piece_counts();
+
+        let race = race_eval(&game);
+        // White should be winning the race
+        assert!(
+            race > 0,
+            "White pawn near promo should give positive race eval"
+        );
+    }
+
+    #[test]
+    fn test_outside_file_bonus() {
+        let mut game = create_obstocean_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.white_promo_rank = 8;
+        game.recompute_piece_counts();
+
+        // x=0 is "outside" (left of a-file)
+        let outside_score = eval_pawn(0, 4, PlayerColor::White, &game);
+        let edge_score = eval_pawn(1, 4, PlayerColor::White, &game);
+
+        // Outside should be even better than edge
+        assert!(
+            outside_score > edge_score,
+            "Outside file pawn should be best"
+        );
+    }
+}

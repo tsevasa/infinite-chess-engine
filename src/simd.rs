@@ -196,4 +196,66 @@ mod tests {
         assert_eq!(a, 0b1100);
         assert_eq!(b, 0b0010);
     }
+
+    #[test]
+    fn test_either_nonzero() {
+        assert!(!either_nonzero(0, 0));
+        assert!(either_nonzero(1, 0));
+        assert!(either_nonzero(0, 1));
+        assert!(either_nonzero(1, 1));
+        assert!(either_nonzero(u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn test_andnot_pairs() {
+        // a1 & !b1, a2 & !b2
+        let (a, b) = andnot_pairs(0b1111, 0b1111, 0b1100, 0b0011);
+        assert_eq!(a, 0b0011); // 1111 & !1100 = 1111 & 0011 = 0011
+        assert_eq!(b, 0b1100); // 1111 & !0011 = 1111 & 1100 = 1100
+
+        let (a, b) = andnot_pairs(0xFF, 0xFF, 0xFF, 0xFF);
+        assert_eq!(a, 0);
+        assert_eq!(b, 0);
+    }
+
+    #[test]
+    fn test_add_i32_pairs() {
+        let (a, b) = add_i32_pairs(10, 20, 5, 15);
+        assert_eq!(a, 15);
+        assert_eq!(b, 35);
+
+        let (a, b) = add_i32_pairs(-10, -20, 30, 40);
+        assert_eq!(a, 20);
+        assert_eq!(b, 20);
+    }
+
+    #[test]
+    fn test_count_pieces_both_colors() {
+        let (w, b) = count_pieces_both_colors(0b11111111, 0b1111);
+        assert_eq!(w, 8);
+        assert_eq!(b, 4);
+    }
+
+    #[test]
+    fn test_tile_is_empty() {
+        assert!(tile_is_empty(0, 0));
+        assert!(!tile_is_empty(1, 0));
+        assert!(!tile_is_empty(0, 1));
+    }
+
+    #[test]
+    fn test_has_pieces_of_either_type() {
+        assert!(!has_pieces_of_either_type(0, 0));
+        assert!(has_pieces_of_either_type(1, 0));
+        assert!(has_pieces_of_either_type(0, 1));
+    }
+
+    #[test]
+    fn test_combined_sliders() {
+        // bishops=0b0001, rooks=0b0010, queens=0b0100
+        // Result: (bishops|queens, rooks|queens) = (0b0101, 0b0110)
+        let (diag, ortho) = combined_sliders(0b0001, 0b0010, 0b0100);
+        assert_eq!(diag, 0b0101);
+        assert_eq!(ortho, 0b0110);
+    }
 }

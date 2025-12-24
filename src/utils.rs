@@ -31,3 +31,65 @@ pub fn is_prime_i64(n: i64) -> bool {
 
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_small_primes() {
+        assert!(is_prime_i64(2));
+        assert!(is_prime_i64(3));
+        assert!(is_prime_i64(5));
+        assert!(is_prime_i64(7));
+        assert!(is_prime_i64(11));
+        assert!(is_prime_i64(13));
+        assert!(is_prime_i64(17));
+        assert!(is_prime_i64(19));
+        assert!(is_prime_i64(23));
+    }
+
+    #[test]
+    fn test_small_composites() {
+        assert!(!is_prime_i64(4));
+        assert!(!is_prime_i64(6));
+        assert!(!is_prime_i64(8));
+        assert!(!is_prime_i64(9));
+        assert!(!is_prime_i64(10));
+        assert!(!is_prime_i64(12));
+        assert!(!is_prime_i64(15));
+        assert!(!is_prime_i64(21));
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        assert!(!is_prime_i64(0));
+        assert!(!is_prime_i64(1));
+        assert!(!is_prime_i64(-1));
+        assert!(!is_prime_i64(i64::MIN));
+    }
+
+    #[test]
+    fn test_negative_primes() {
+        // abs() of negative primes should still return true
+        assert!(is_prime_i64(-2));
+        assert!(is_prime_i64(-3));
+        assert!(is_prime_i64(-5));
+        assert!(is_prime_i64(-7));
+    }
+
+    #[test]
+    fn test_larger_primes() {
+        assert!(is_prime_i64(97));
+        assert!(is_prime_i64(101));
+        assert!(is_prime_i64(1009));
+    }
+
+    #[test]
+    fn test_larger_composites() {
+        assert!(!is_prime_i64(100));
+        assert!(!is_prime_i64(1000));
+        assert!(!is_prime_i64(49)); // 7*7
+        assert!(!is_prime_i64(121)); // 11*11
+    }
+}

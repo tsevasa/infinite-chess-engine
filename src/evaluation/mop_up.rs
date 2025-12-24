@@ -982,3 +982,135 @@ pub fn needs_king_for_mate(board: &Board, color: PlayerColor) -> bool {
 
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Board, Piece};
+    use crate::game::GameState;
+
+    fn create_test_game() -> GameState {
+        let mut game = GameState::new();
+        game.board = Board::new();
+        game.white_promo_rank = 8;
+        game.black_promo_rank = 1;
+        game
+    }
+
+    #[test]
+    fn test_is_lone_king_true() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.recompute_piece_counts();
+
+        assert!(is_lone_king(&game, PlayerColor::White));
+    }
+
+    #[test]
+    fn test_is_lone_king_false() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(4, 1, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.recompute_piece_counts();
+
+        assert!(!is_lone_king(&game, PlayerColor::White));
+    }
+
+    #[test]
+    fn test_calculate_mop_up_scale_returns_none_for_no_advantage() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 1, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.board
+            .set_piece(4, 8, Piece::new(PieceType::Queen, PlayerColor::Black));
+        game.recompute_piece_counts();
+
+        // Both sides have material, so no mop-up
+        let scale = calculate_mop_up_scale(&game, PlayerColor::Black);
+        // May or may not apply depending on thresholds
+        assert!(scale.is_none() || scale.unwrap() <= 100);
+    }
+
+    #[test]
+    fn test_needs_king_for_mate_true() {
+        // Just a knight - needs king
+        let mut board = Board::new();
+        board.set_piece(3, 3, Piece::new(PieceType::Knight, PlayerColor::White));
+
+        assert!(needs_king_for_mate(&board, PlayerColor::White));
+    }
+
+    #[test]
+    fn test_needs_king_for_mate_false_two_queens() {
+        let mut board = Board::new();
+        board.set_piece(3, 3, Piece::new(PieceType::Queen, PlayerColor::White));
+        board.set_piece(4, 3, Piece::new(PieceType::Queen, PlayerColor::White));
+        board.rebuild_tiles();
+
+        assert!(!needs_king_for_mate(&board, PlayerColor::White));
+    }
+
+    #[test]
+    fn test_needs_king_for_mate_false_three_rooks() {
+        let mut board = Board::new();
+        board.set_piece(1, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        board.set_piece(2, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        board.set_piece(3, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        board.rebuild_tiles();
+
+        assert!(!needs_king_for_mate(&board, PlayerColor::White));
+    }
+
+    #[test]
+    fn test_evaluate_lone_king_endgame_returns_value() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 1, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let enemy_king = Coordinate::new(5, 8);
+        let our_king = Coordinate::new(5, 1);
+
+        let score =
+            evaluate_lone_king_endgame(&game, Some(&our_king), &enemy_king, PlayerColor::White);
+        // Should be positive (White has advantage)
+        assert!(score >= 0);
+    }
+
+    #[test]
+    fn test_evaluate_mop_up_scaled_no_king() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.board
+            .set_piece(3, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let enemy_king = Coordinate::new(5, 8);
+
+        // No white king (checkmate practice)
+        let score = evaluate_mop_up_scaled(
+            &game,
+            None,
+            &enemy_king,
+            PlayerColor::White,
+            PlayerColor::Black,
+        );
+        assert!(score.abs() < 100000);
+    }
+}

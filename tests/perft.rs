@@ -1,3 +1,4 @@
+#![cfg(not(coverage))]
 use hydrochess_wasm::board::{Board, Piece, PieceType, PlayerColor};
 use hydrochess_wasm::game::GameState;
 use hydrochess_wasm::moves::Move;

@@ -2177,3 +2177,538 @@ impl GameState {
         self.recompute_hash();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a minimal game state for testing
+    fn create_test_game() -> GameState {
+        let mut game = GameState::new();
+        // Add kings so the position is "legal"
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.recompute_piece_counts();
+        game.recompute_hash();
+        game
+    }
+
+    // ======================== 50-Move Rule Tests ========================
+
+    #[test]
+    fn test_is_fifty_returns_false_when_no_rule() {
+        let mut game = create_test_game();
+        game.game_rules.move_rule_limit = None;
+        game.halfmove_clock = 200;
+        assert!(
+            !game.is_fifty(),
+            "Should never trigger draw when no move rule limit"
+        );
+    }
+
+    #[test]
+    fn test_is_fifty_returns_false_below_limit() {
+        let mut game = create_test_game();
+        game.game_rules.move_rule_limit = Some(100);
+        game.halfmove_clock = 99;
+        assert!(!game.is_fifty(), "Should not trigger draw below limit");
+    }
+
+    #[test]
+    fn test_is_fifty_returns_true_at_limit() {
+        let mut game = create_test_game();
+        game.game_rules.move_rule_limit = Some(100);
+        game.halfmove_clock = 100;
+        assert!(game.is_fifty(), "Should trigger draw at limit");
+    }
+
+    #[test]
+    fn test_is_fifty_returns_true_above_limit() {
+        let mut game = create_test_game();
+        game.game_rules.move_rule_limit = Some(100);
+        game.halfmove_clock = 150;
+        assert!(game.is_fifty(), "Should trigger draw above limit");
+    }
+
+    #[test]
+    fn test_is_fifty_respects_null_move() {
+        let mut game = create_test_game();
+        game.game_rules.move_rule_limit = Some(100);
+        game.halfmove_clock = 100;
+        game.null_moves = 1;
+        assert!(
+            !game.is_fifty(),
+            "Should not trigger during null move search"
+        );
+    }
+
+    #[test]
+    fn test_is_fifty_custom_limit() {
+        let mut game = create_test_game();
+        game.game_rules.move_rule_limit = Some(150); // 75-move rule
+        game.halfmove_clock = 149;
+        assert!(!game.is_fifty());
+        game.halfmove_clock = 150;
+        assert!(game.is_fifty());
+    }
+
+    // ======================== Repetition Tests ========================
+
+    #[test]
+    fn test_is_repetition_no_repetition() {
+        let game = create_test_game();
+        assert!(!game.is_repetition(5), "No repetition initially");
+    }
+
+    #[test]
+    fn test_is_repetition_twofold_within_search() {
+        let mut game = create_test_game();
+        game.repetition = 2; // Positive = twofold, distance = 2
+        // Only draw if repetition < ply (both occurrences in search tree)
+        assert!(!game.is_repetition(1), "ply=1 < repetition=2, not a draw");
+        assert!(!game.is_repetition(2), "ply=2 == repetition=2, not a draw");
+        assert!(game.is_repetition(3), "ply=3 > repetition=2, is a draw");
+    }
+
+    #[test]
+    fn test_is_repetition_threefold() {
+        let mut game = create_test_game();
+        game.repetition = -3; // Negative = threefold
+        // Threefold is always a draw (negative is always < positive ply)
+        assert!(game.is_repetition(1), "Threefold should always draw");
+        assert!(game.is_repetition(10), "Threefold should always draw");
+    }
+
+    #[test]
+    fn test_is_repetition_during_null_move() {
+        let mut game = create_test_game();
+        game.repetition = -3;
+        game.null_moves = 1;
+        assert!(!game.is_repetition(5), "Should not detect during null move");
+    }
+
+    // ======================== Null Move Tests ========================
+
+    #[test]
+    fn test_null_move_flips_turn() {
+        let mut game = create_test_game();
+        game.turn = PlayerColor::White;
+        game.make_null_move();
+        assert_eq!(game.turn, PlayerColor::Black);
+        game.unmake_null_move();
+        assert_eq!(game.turn, PlayerColor::White);
+    }
+
+    #[test]
+    fn test_null_move_clears_en_passant() {
+        let mut game = create_test_game();
+        game.en_passant = Some(EnPassantState {
+            square: Coordinate::new(4, 3),
+            pawn_square: Coordinate::new(4, 4),
+        });
+        game.make_null_move();
+        assert!(game.en_passant.is_none(), "En passant should be cleared");
+        game.unmake_null_move();
+        // Note: en_passant is not restored by unmake_null_move (standard behavior)
+    }
+
+    #[test]
+    fn test_null_move_increments_counter() {
+        let mut game = create_test_game();
+        assert_eq!(game.null_moves, 0);
+        game.make_null_move();
+        assert_eq!(game.null_moves, 1);
+        game.make_null_move();
+        assert_eq!(game.null_moves, 2);
+        game.unmake_null_move();
+        assert_eq!(game.null_moves, 1);
+    }
+
+    #[test]
+    fn test_null_move_hash_restored() {
+        let mut game = create_test_game();
+        let original_hash = game.hash;
+        game.make_null_move();
+        assert_ne!(game.hash, original_hash, "Hash should change");
+        game.unmake_null_move();
+        assert_eq!(game.hash, original_hash, "Hash should be restored");
+    }
+
+    // ======================== King Position Tests ========================
+
+    #[test]
+    fn test_king_positions_tracked() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(3, 3, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(7, 7, Piece::new(PieceType::King, PlayerColor::Black));
+        game.recompute_piece_counts();
+
+        assert_eq!(game.white_king_pos, Some(Coordinate::new(3, 3)));
+        assert_eq!(game.black_king_pos, Some(Coordinate::new(7, 7)));
+    }
+
+    #[test]
+    fn test_royal_centaur_tracked_as_king() {
+        let mut game = GameState::new();
+        game.board.set_piece(
+            4,
+            4,
+            Piece::new(PieceType::RoyalCentaur, PlayerColor::White),
+        );
+        game.board
+            .set_piece(6, 6, Piece::new(PieceType::RoyalQueen, PlayerColor::Black));
+        game.recompute_piece_counts();
+
+        assert_eq!(game.white_king_pos, Some(Coordinate::new(4, 4)));
+        assert_eq!(game.black_king_pos, Some(Coordinate::new(6, 6)));
+    }
+
+    // ======================== Piece Count Tests ========================
+
+    #[test]
+    fn test_piece_counts_accurate() {
+        let mut game = GameState::new();
+        // Add pieces
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(2, 1, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.board
+            .set_piece(3, 1, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(4, 1, Piece::new(PieceType::Pawn, PlayerColor::White));
+
+        game.board
+            .set_piece(1, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(2, 8, Piece::new(PieceType::Rook, PlayerColor::Black));
+
+        game.recompute_piece_counts();
+
+        assert_eq!(game.white_piece_count, 4);
+        assert_eq!(game.black_piece_count, 2);
+        assert_eq!(game.white_pawn_count, 2);
+        assert_eq!(game.black_pawn_count, 0);
+    }
+
+    #[test]
+    fn test_non_pawn_material_tracked() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(1, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.recompute_piece_counts();
+
+        assert!(
+            !game.has_non_pawn_material(PlayerColor::White),
+            "Only king = no NPM"
+        );
+
+        game.board
+            .set_piece(2, 1, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.recompute_piece_counts();
+
+        assert!(
+            game.has_non_pawn_material(PlayerColor::White),
+            "Knight = has NPM"
+        );
+    }
+
+    // ======================== Hash Consistency Tests ========================
+
+    #[test]
+    fn test_hash_changes_on_move() {
+        let mut game = GameState::new();
+        game.setup_standard_chess();
+        let initial_hash = game.hash;
+
+        // Make a simple pawn move
+        let moves = game.get_legal_moves();
+        if let Some(m) = moves.first() {
+            let _undo = game.make_move(m);
+            assert_ne!(game.hash, initial_hash, "Hash should change after move");
+        }
+    }
+
+    #[test]
+    fn test_hash_restored_on_unmake() {
+        let mut game = GameState::new();
+        game.setup_standard_chess();
+        let initial_hash = game.hash;
+
+        let moves = game.get_legal_moves();
+        if let Some(m) = moves.first() {
+            let undo = game.make_move(m);
+            game.undo_move(m, undo);
+            assert_eq!(
+                game.hash, initial_hash,
+                "Hash should be restored after undo"
+            );
+        }
+    }
+
+    #[test]
+    fn test_recompute_hash_matches_incremental() {
+        let mut game = GameState::new();
+        game.setup_standard_chess();
+
+        // Make several moves
+        for _ in 0..5 {
+            let moves = game.get_legal_moves();
+            let legal_moves: Vec<_> = moves
+                .iter()
+                .filter(|m| {
+                    let undo = game.make_move(m);
+                    let illegal = game.is_move_illegal();
+                    game.undo_move(m, undo);
+                    !illegal
+                })
+                .collect();
+
+            if let Some(m) = legal_moves.first() {
+                let _undo = game.make_move(m);
+            } else {
+                break;
+            }
+        }
+
+        let incremental_hash = game.hash;
+        game.recompute_hash();
+        assert_eq!(
+            game.hash, incremental_hash,
+            "Recomputed hash should match incremental"
+        );
+    }
+
+    // ======================== Move Make/Unmake Tests ========================
+
+    #[test]
+    fn test_halfmove_clock_increments() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        // Knight move (not pawn, not capture) should increment
+        let m = Move {
+            from: Coordinate::new(4, 4),
+            to: Coordinate::new(5, 6),
+            piece: Piece::new(PieceType::Knight, PlayerColor::White),
+            promotion: None,
+            rook_coord: None,
+        };
+
+        game.halfmove_clock = 10;
+        let _undo = game.make_move(&m);
+        assert_eq!(game.halfmove_clock, 11, "Should increment on quiet move");
+    }
+
+    #[test]
+    fn test_halfmove_clock_resets_on_pawn() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(4, 2, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        let m = Move {
+            from: Coordinate::new(4, 2),
+            to: Coordinate::new(4, 3),
+            piece: Piece::new(PieceType::Pawn, PlayerColor::White),
+            promotion: None,
+            rook_coord: None,
+        };
+
+        game.halfmove_clock = 50;
+        let _undo = game.make_move(&m);
+        assert_eq!(game.halfmove_clock, 0, "Should reset on pawn move");
+    }
+
+    #[test]
+    fn test_halfmove_clock_resets_on_capture() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.board
+            .set_piece(5, 6, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        let m = Move {
+            from: Coordinate::new(4, 4),
+            to: Coordinate::new(5, 6),
+            piece: Piece::new(PieceType::Knight, PlayerColor::White),
+            promotion: None,
+            rook_coord: None,
+        };
+
+        game.halfmove_clock = 50;
+        let _undo = game.make_move(&m);
+        assert_eq!(game.halfmove_clock, 0, "Should reset on capture");
+    }
+
+    #[test]
+    fn test_halfmove_clock_restored_on_unmake() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        let m = Move {
+            from: Coordinate::new(4, 4),
+            to: Coordinate::new(5, 6),
+            piece: Piece::new(PieceType::Knight, PlayerColor::White),
+            promotion: None,
+            rook_coord: None,
+        };
+
+        game.halfmove_clock = 42;
+        let undo = game.make_move(&m);
+        game.undo_move(&m, undo);
+        assert_eq!(game.halfmove_clock, 42, "Should restore halfmove clock");
+    }
+
+    // ======================== Lone King Endgame Tests ========================
+
+    #[test]
+    fn test_is_lone_king_endgame_both_have_pieces() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(2, 1, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.board
+            .set_piece(1, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(2, 8, Piece::new(PieceType::Rook, PlayerColor::Black));
+        game.recompute_piece_counts();
+
+        assert!(!game.is_lone_king_endgame());
+    }
+
+    #[test]
+    fn test_is_lone_king_endgame_white_lone_king() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(1, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(2, 8, Piece::new(PieceType::Rook, PlayerColor::Black));
+        game.recompute_piece_counts();
+
+        assert!(game.is_lone_king_endgame());
+    }
+
+    #[test]
+    fn test_is_lone_king_endgame_black_lone_king() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(2, 1, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.board
+            .set_piece(1, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.recompute_piece_counts();
+
+        assert!(game.is_lone_king_endgame());
+    }
+
+    // ======================== Check Detection Tests ========================
+
+    #[test]
+    fn test_is_in_check_basic() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(5, 4, Piece::new(PieceType::Rook, PlayerColor::Black)); // Checking white king
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        assert!(
+            game.is_in_check(),
+            "White king should be in check from rook"
+        );
+    }
+
+    #[test]
+    fn test_is_in_check_knight() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 3, Piece::new(PieceType::Knight, PlayerColor::Black)); // Checking white king
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        assert!(
+            game.is_in_check(),
+            "White king should be in check from knight"
+        );
+    }
+
+    #[test]
+    fn test_is_in_check_no_check() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // Place rook NOT on any line with the king (not same row, column, or diagonal)
+        game.board
+            .set_piece(3, 4, Piece::new(PieceType::Rook, PlayerColor::Black));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        assert!(!game.is_in_check(), "White king should not be in check");
+    }
+
+    // ======================== Standard Chess Setup Tests ========================
+
+    #[test]
+    fn test_setup_standard_chess() {
+        let mut game = GameState::new();
+        game.setup_standard_chess();
+
+        // Check piece counts
+        assert_eq!(game.white_piece_count, 16);
+        assert_eq!(game.black_piece_count, 16);
+
+        // Check king positions
+        assert_eq!(game.white_king_pos, Some(Coordinate::new(5, 1)));
+        assert_eq!(game.black_king_pos, Some(Coordinate::new(5, 8)));
+
+        // Check it's white's turn
+        assert_eq!(game.turn, PlayerColor::White);
+
+        // Check promotion ranks set
+        assert_eq!(game.white_promo_rank, 8);
+        assert_eq!(game.black_promo_rank, 1);
+    }
+
+    #[test]
+    fn test_standard_chess_has_moves() {
+        let mut game = GameState::new();
+        game.setup_standard_chess();
+
+        let moves = game.get_legal_moves();
+        // In infinite chess, sliders can have many more moves than classical chess
+        // Just verify we have some moves available
+        assert!(!moves.is_empty(), "Should have legal moves at start");
+    }
+}

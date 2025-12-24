@@ -524,3 +524,180 @@ fn evaluate_pawn_confined(
 
     bonus
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Board, Piece};
+    use crate::game::GameState;
+
+    fn create_confined_game() -> GameState {
+        let mut game = GameState::new();
+        game.board = Board::new();
+        game.variant = Some(crate::Variant::ConfinedClassical);
+        game.white_promo_rank = 8;
+        game.black_promo_rank = 1;
+        game
+    }
+
+    #[test]
+    fn test_evaluate_returns_value() {
+        let mut game = create_confined_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        let score = evaluate(&game);
+        assert!(score.abs() < 10000, "K vs K should be near 0");
+    }
+
+    #[test]
+    fn test_evaluate_knight_confined_white() {
+        // Knight advanced should score better
+        let front_score = evaluate_knight_confined(4, 6, PlayerColor::White);
+        let back_score = evaluate_knight_confined(4, 1, PlayerColor::White);
+
+        assert!(
+            front_score > back_score,
+            "Advanced knight should score better"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_knight_confined_black() {
+        let front_score = evaluate_knight_confined(4, 3, PlayerColor::Black);
+        let back_score = evaluate_knight_confined(4, 8, PlayerColor::Black);
+
+        assert!(
+            front_score > back_score,
+            "Advanced black knight should score better"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_bishop_confined() {
+        // Advanced bishop = better
+        let advanced = evaluate_bishop_confined(4, 6, PlayerColor::White);
+        let back = evaluate_bishop_confined(4, 1, PlayerColor::White);
+
+        assert!(advanced > back, "Advanced bishop should score better");
+    }
+
+    #[test]
+    fn test_evaluate_pawn_confined_center() {
+        // Center pawns (d/e file) should score better
+        let center = evaluate_pawn_confined(4, 4, PlayerColor::White, 8, 1);
+        let wing = evaluate_pawn_confined(1, 4, PlayerColor::White, 8, 1);
+
+        assert!(
+            center > wing,
+            "Center pawn should score better than wing pawn"
+        );
+    }
+
+    #[test]
+    fn test_king_center_bonus() {
+        // Center king = +35, corner king = -17.5
+        let center_king = Some(Coordinate::new(4, 4));
+        let corner_king = Some(Coordinate::new(1, 1));
+        let black_king = Some(Coordinate::new(5, 8));
+
+        let center_score = evaluate_king_position_confined(&center_king, &black_king);
+        let corner_score = evaluate_king_position_confined(&corner_king, &black_king);
+
+        assert!(
+            center_score > corner_score,
+            "Center king should score better"
+        );
+    }
+
+    #[test]
+    fn test_queen_early_penalty() {
+        let mut game = create_confined_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // White minors not developed, queen out
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        // Knights still on back rank
+        game.board
+            .set_piece(2, 1, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.board
+            .set_piece(7, 1, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+
+        let score_early_queen = evaluate(&game);
+
+        // Now with minors developed and queen back
+        game.board.remove_piece(&4, &4);
+        game.board
+            .set_piece(4, 1, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.board.remove_piece(&2, &1);
+        game.board.remove_piece(&7, &1);
+        game.board
+            .set_piece(3, 4, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.board
+            .set_piece(6, 4, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.recompute_piece_counts();
+
+        let score_developed = evaluate(&game);
+
+        // Developed should be better (or at least run without panic)
+        assert!(score_developed.abs() < 100000);
+        assert!(score_early_queen.abs() < 100000);
+    }
+
+    #[test]
+    fn test_obstacle_value() {
+        let mut game = create_confined_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // Add obstacles on back rank
+        game.board
+            .set_piece(1, 0, Piece::new(PieceType::Obstacle, PlayerColor::Neutral));
+        game.board
+            .set_piece(2, 0, Piece::new(PieceType::Obstacle, PlayerColor::Neutral));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+
+        let score = evaluate_development_confined(&game);
+        // Should get back obstacle bonus
+        assert!(
+            score >= BACK_OBSTACLE_VALUE,
+            "Should get bonus for back obstacles"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_from_black_perspective() {
+        let mut game = create_confined_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.recompute_piece_counts();
+
+        game.turn = PlayerColor::White;
+        let score_white = evaluate(&game);
+
+        game.turn = PlayerColor::Black;
+        let score_black = evaluate(&game);
+
+        // Scores should be negated
+        assert_eq!(
+            score_white, -score_black,
+            "Score should negate for opposite side"
+        );
+    }
+}

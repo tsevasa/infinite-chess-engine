@@ -352,9 +352,6 @@ pub struct Board {
     /// NOT updated incrementally - call rebuild_tiles() before hot path usage
     #[serde(skip)]
     pub tiles: TileTable,
-    /// Flag indicating tiles are in sync with pieces
-    #[serde(skip)]
-    tiles_valid: bool,
 }
 
 /// Raw representation for serialization
@@ -394,7 +391,6 @@ impl From<BoardRaw> for Board {
             pieces: raw.pieces,
             active_coords,
             tiles,
-            tiles_valid: true,
         }
     }
 }
@@ -433,7 +429,6 @@ impl Board {
             pieces: FxHashMap::default(),
             active_coords: None,
             tiles: TileTable::new(),
-            tiles_valid: true,
         }
     }
 
@@ -585,7 +580,6 @@ impl Board {
         self.pieces.clear();
         self.active_coords = None;
         self.tiles.clear();
-        self.tiles_valid = true;
     }
 
     /// Rebuild tiles from HashMap. Call this ONCE before hot-path operations
@@ -594,16 +588,12 @@ impl Board {
     /// once per position, not per operation.
     #[inline]
     pub fn rebuild_tiles(&mut self) {
-        if self.tiles_valid {
-            return;
-        }
         self.tiles.clear();
         for (&(x, y), &piece) in &self.pieces {
             let (cx, cy) = tile_coords(x, y);
             let idx = local_index(x, y);
             self.tiles.get_or_create(cx, cy).set_piece(idx, piece);
         }
-        self.tiles_valid = true;
     }
 
     /// Force rebuild tiles (for use after make_move/undo_move cycles)
@@ -618,12 +608,6 @@ impl Board {
     pub fn get_neighborhood(&self, x: i64, y: i64) -> [Option<&Tile>; 9] {
         let (cx, cy) = tile_coords(x, y);
         self.tiles.get_neighborhood(cx, cy)
-    }
-
-    /// Check if tiles are in sync with pieces
-    #[inline]
-    pub fn tiles_valid(&self) -> bool {
-        self.tiles_valid
     }
 }
 
@@ -681,5 +665,192 @@ mod tests {
 
         let black_king = Piece::new(PieceType::King, PlayerColor::Black);
         assert_eq!(black_king.packed(), 2 * 22 + 2); // Black=2, King=2
+    }
+
+    #[test]
+    fn test_coordinate() {
+        let c = Coordinate::new(5, 10);
+        assert_eq!(c.x, 5);
+        assert_eq!(c.y, 10);
+        assert_eq!(c.get_x(), 5);
+        assert_eq!(c.get_y(), 10);
+    }
+
+    #[test]
+    fn test_player_color_from_str() {
+        assert_eq!(PlayerColor::from_str("white"), Some(PlayerColor::White));
+        assert_eq!(PlayerColor::from_str("black"), Some(PlayerColor::Black));
+        assert_eq!(PlayerColor::from_str("neutral"), Some(PlayerColor::Neutral));
+        assert_eq!(PlayerColor::from_str("invalid"), None);
+    }
+
+    #[test]
+    fn test_player_color_to_str() {
+        // to_str returns the exact string that from_str accepts
+        let w = PlayerColor::White.to_str();
+        let b = PlayerColor::Black.to_str();
+        let n = PlayerColor::Neutral.to_str();
+        assert!(!w.is_empty());
+        assert!(!b.is_empty());
+        assert!(!n.is_empty());
+    }
+
+    #[test]
+    fn test_player_color_opponent() {
+        assert_eq!(PlayerColor::White.opponent(), PlayerColor::Black);
+        assert_eq!(PlayerColor::Black.opponent(), PlayerColor::White);
+        assert_eq!(PlayerColor::Neutral.opponent(), PlayerColor::Neutral);
+    }
+
+    #[test]
+    fn test_player_color_from_u8() {
+        assert_eq!(PlayerColor::from_u8(0), PlayerColor::Neutral);
+        assert_eq!(PlayerColor::from_u8(1), PlayerColor::White);
+        assert_eq!(PlayerColor::from_u8(2), PlayerColor::Black);
+    }
+
+    #[test]
+    fn test_piece_type_from_str() {
+        assert_eq!(PieceType::from_str("k"), Some(PieceType::King));
+        assert_eq!(PieceType::from_str("q"), Some(PieceType::Queen));
+        assert_eq!(PieceType::from_str("r"), Some(PieceType::Rook));
+        assert_eq!(PieceType::from_str("b"), Some(PieceType::Bishop));
+        assert_eq!(PieceType::from_str("n"), Some(PieceType::Knight));
+        assert_eq!(PieceType::from_str("p"), Some(PieceType::Pawn));
+        assert_eq!(PieceType::from_str("x"), Some(PieceType::Obstacle));
+        assert_eq!(PieceType::from_str("v"), Some(PieceType::Void));
+        assert_eq!(PieceType::from_str("invalid"), None);
+    }
+
+    #[test]
+    fn test_piece_type_to_str() {
+        assert_eq!(PieceType::King.to_str(), "k");
+        assert_eq!(PieceType::Queen.to_str(), "q");
+        assert_eq!(PieceType::Rook.to_str(), "r");
+        assert_eq!(PieceType::Bishop.to_str(), "b");
+        assert_eq!(PieceType::Knight.to_str(), "n");
+        assert_eq!(PieceType::Pawn.to_str(), "p");
+    }
+
+    #[test]
+    fn test_piece_type_to_site_code() {
+        assert_eq!(PieceType::King.to_site_code(), "K");
+        assert_eq!(PieceType::Queen.to_site_code(), "Q");
+        assert_eq!(PieceType::Amazon.to_site_code(), "AM");
+        assert_eq!(PieceType::Chancellor.to_site_code(), "CH");
+    }
+
+    #[test]
+    fn test_piece_type_is_neutral_type() {
+        assert!(PieceType::Void.is_neutral_type());
+        assert!(PieceType::Obstacle.is_neutral_type());
+        assert!(!PieceType::King.is_neutral_type());
+        assert!(!PieceType::Pawn.is_neutral_type());
+    }
+
+    #[test]
+    fn test_piece_type_is_uncapturable() {
+        assert!(PieceType::Void.is_uncapturable());
+        assert!(!PieceType::Obstacle.is_uncapturable());
+        assert!(!PieceType::King.is_uncapturable());
+    }
+
+    #[test]
+    fn test_piece_type_is_royal() {
+        assert!(PieceType::King.is_royal());
+        assert!(PieceType::RoyalQueen.is_royal());
+        assert!(PieceType::RoyalCentaur.is_royal());
+        assert!(!PieceType::Queen.is_royal());
+        assert!(!PieceType::Pawn.is_royal());
+    }
+
+    #[test]
+    fn test_piece_type_promotable_types() {
+        let types = PieceType::promotable_types();
+        assert!(types.contains(&PieceType::Queen));
+        assert!(types.contains(&PieceType::Rook));
+        assert!(types.contains(&PieceType::Bishop));
+        assert!(types.contains(&PieceType::Knight));
+        assert!(!types.contains(&PieceType::Pawn));
+        assert!(!types.contains(&PieceType::King));
+    }
+
+    #[test]
+    fn test_board_new() {
+        let board = Board::new();
+        assert!(board.is_empty());
+        assert_eq!(board.len(), 0);
+    }
+
+    #[test]
+    fn test_board_set_get_remove() {
+        let mut board = Board::new();
+        let piece = Piece::new(PieceType::King, PlayerColor::White);
+
+        board.set_piece(5, 5, piece);
+        assert_eq!(board.len(), 1);
+        assert!(!board.is_empty());
+
+        let got = board.get_piece(5, 5);
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().piece_type(), PieceType::King);
+
+        let removed = board.remove_piece(&5, &5);
+        assert!(removed.is_some());
+        assert_eq!(board.len(), 0);
+    }
+
+    #[test]
+    fn test_board_is_occupied() {
+        let mut board = Board::new();
+        board.set_piece(3, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        board.rebuild_tiles();
+
+        assert!(board.is_occupied(3, 4));
+        assert!(!board.is_occupied(3, 5));
+    }
+
+    #[test]
+    fn test_board_is_occupied_by_color() {
+        let mut board = Board::new();
+        board.set_piece(3, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        board.set_piece(5, 6, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        board.rebuild_tiles();
+
+        assert!(board.is_occupied_by_color(3, 4, PlayerColor::White));
+        assert!(!board.is_occupied_by_color(3, 4, PlayerColor::Black));
+        assert!(board.is_occupied_by_color(5, 6, PlayerColor::Black));
+    }
+
+    #[test]
+    fn test_board_clear() {
+        let mut board = Board::new();
+        board.set_piece(1, 1, Piece::new(PieceType::King, PlayerColor::White));
+        board.set_piece(2, 2, Piece::new(PieceType::Queen, PlayerColor::Black));
+        assert_eq!(board.len(), 2);
+
+        board.clear();
+        assert!(board.is_empty());
+        assert_eq!(board.len(), 0);
+    }
+
+    #[test]
+    fn test_board_iter() {
+        let mut board = Board::new();
+        board.set_piece(1, 1, Piece::new(PieceType::King, PlayerColor::White));
+        board.set_piece(8, 8, Piece::new(PieceType::King, PlayerColor::Black));
+
+        let count = board.iter().count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_piece_from_packed() {
+        let original = Piece::new(PieceType::Queen, PlayerColor::Black);
+        let packed = original.packed();
+        let reconstructed = Piece::from_packed(packed);
+
+        assert_eq!(reconstructed.piece_type(), PieceType::Queen);
+        assert_eq!(reconstructed.color(), PlayerColor::Black);
     }
 }

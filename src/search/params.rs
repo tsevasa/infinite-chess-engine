@@ -585,3 +585,101 @@ pub fn delta_margin() -> i32 {
 pub const fn delta_margin() -> i32 {
     DEFAULT_DELTA_MARGIN
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_nmp_params() {
+        assert_eq!(nmp_reduction(), DEFAULT_NMP_REDUCTION);
+        assert_eq!(nmp_min_depth(), DEFAULT_NMP_MIN_DEPTH);
+    }
+
+    #[test]
+    fn test_lmr_params() {
+        assert_eq!(lmr_min_depth(), DEFAULT_LMR_MIN_DEPTH);
+        assert_eq!(lmr_min_moves(), DEFAULT_LMR_MIN_MOVES);
+        assert_eq!(lmr_divisor(), DEFAULT_LMR_DIVISOR);
+    }
+
+    #[test]
+    fn test_hlp_params() {
+        assert_eq!(hlp_max_depth(), DEFAULT_HLP_MAX_DEPTH);
+        assert_eq!(hlp_min_moves(), DEFAULT_HLP_MIN_MOVES);
+        assert_eq!(hlp_history_reduce(), DEFAULT_HLP_HISTORY_REDUCE);
+        assert_eq!(hlp_history_leaf(), DEFAULT_HLP_HISTORY_LEAF);
+    }
+
+    #[test]
+    fn test_lmp_threshold() {
+        assert_eq!(lmp_threshold(0), 0);
+        assert_eq!(lmp_threshold(1), DEFAULT_LMP_THRESHOLD[1]);
+        assert_eq!(lmp_threshold(2), DEFAULT_LMP_THRESHOLD[2]);
+        assert_eq!(lmp_threshold(3), DEFAULT_LMP_THRESHOLD[3]);
+        assert_eq!(lmp_threshold(4), DEFAULT_LMP_THRESHOLD[4]);
+        assert_eq!(lmp_threshold(100), DEFAULT_LMP_THRESHOLD[4]); // Out of bounds
+    }
+
+    #[test]
+    fn test_aspiration_params() {
+        assert_eq!(aspiration_window(), DEFAULT_ASPIRATION_WINDOW);
+        assert_eq!(aspiration_fail_mult(), DEFAULT_ASPIRATION_FAIL_MULT);
+        assert_eq!(aspiration_max_window(), DEFAULT_ASPIRATION_MAX_WINDOW);
+    }
+
+    #[test]
+    fn test_futility_margin() {
+        assert_eq!(futility_margin(0), DEFAULT_FUTILITY_MARGIN[0]);
+        assert_eq!(futility_margin(1), DEFAULT_FUTILITY_MARGIN[1]);
+        assert_eq!(futility_margin(2), DEFAULT_FUTILITY_MARGIN[2]);
+        assert_eq!(futility_margin(3), DEFAULT_FUTILITY_MARGIN[3]);
+        assert_eq!(futility_margin(100), DEFAULT_FUTILITY_MARGIN[3]); // Out of bounds
+    }
+
+    #[test]
+    fn test_rfp_params() {
+        assert_eq!(rfp_max_depth(), DEFAULT_RFP_MAX_DEPTH);
+        assert_eq!(rfp_margin_per_depth(), DEFAULT_RFP_MARGIN_PER_DEPTH);
+    }
+
+    #[test]
+    fn test_iir_min_depth() {
+        assert_eq!(iir_min_depth(), DEFAULT_IIR_MIN_DEPTH);
+    }
+
+    #[test]
+    fn test_sort_scores() {
+        assert_eq!(sort_hash(), DEFAULT_SORT_HASH);
+        assert_eq!(sort_winning_capture(), DEFAULT_SORT_WINNING_CAPTURE);
+        assert_eq!(sort_killer1(), DEFAULT_SORT_KILLER1);
+        assert_eq!(sort_killer2(), DEFAULT_SORT_KILLER2);
+        assert_eq!(sort_countermove(), DEFAULT_SORT_COUNTERMOVE);
+        assert_eq!(see_winning_threshold(), DEFAULT_SEE_WINNING_THRESHOLD);
+    }
+
+    #[test]
+    fn test_history_params() {
+        assert_eq!(max_history(), DEFAULT_MAX_HISTORY);
+        assert_eq!(history_bonus_base(), DEFAULT_HISTORY_BONUS_BASE);
+        assert_eq!(history_bonus_sub(), DEFAULT_HISTORY_BONUS_SUB);
+        assert_eq!(history_bonus_cap(), DEFAULT_HISTORY_BONUS_CAP);
+    }
+
+    #[test]
+    fn test_other_params() {
+        assert_eq!(repetition_penalty(), DEFAULT_REPETITION_PENALTY);
+        assert_eq!(delta_margin(), DEFAULT_DELTA_MARGIN);
+    }
+
+    #[test]
+    fn test_constants_reasonable() {
+        // Smoke tests that values are in reasonable ranges
+        assert!(DEFAULT_NMP_REDUCTION >= 1);
+        assert!(DEFAULT_NMP_REDUCTION <= 5);
+        assert!(DEFAULT_LMR_DIVISOR >= 1);
+        assert!(DEFAULT_ASPIRATION_WINDOW > 0);
+        assert!(DEFAULT_ASPIRATION_MAX_WINDOW > DEFAULT_ASPIRATION_WINDOW);
+        assert!(DEFAULT_MAX_HISTORY > 0);
+    }
+}

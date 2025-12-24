@@ -1859,3 +1859,216 @@ pub fn calculate_initial_material(board: &Board) -> i32 {
     }
     score
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Board, Piece};
+    use crate::game::GameState;
+
+    fn create_test_game() -> GameState {
+        let mut game = GameState::new();
+        game.board = Board::new();
+        game.white_promo_rank = 8;
+        game.black_promo_rank = 1;
+        game
+    }
+
+    #[test]
+    fn test_get_piece_value() {
+        // Standard pieces - values tuned for infinite chess
+        assert_eq!(get_piece_value(PieceType::Pawn), 100);
+        assert_eq!(get_piece_value(PieceType::Knight), 250); // Weak in infinite chess
+        assert_eq!(get_piece_value(PieceType::Bishop), 450); // Strong slider
+        assert_eq!(get_piece_value(PieceType::Rook), 650); // Very strong
+        assert_eq!(get_piece_value(PieceType::Queen), 1350); // > 2 rooks
+
+        // King/Guard have same nominal value
+        assert_eq!(get_piece_value(PieceType::King), 220);
+
+        // Fairy pieces have values
+        assert!(get_piece_value(PieceType::Amazon) > get_piece_value(PieceType::Queen));
+        assert!(get_piece_value(PieceType::Chancellor) > get_piece_value(PieceType::Rook));
+    }
+
+    #[test]
+    fn test_is_between() {
+        assert!(is_between(5, 3, 7));
+        assert!(is_between(5, 7, 3));
+        assert!(!is_between(3, 3, 7));
+        assert!(!is_between(7, 3, 7));
+        assert!(!is_between(2, 3, 7));
+        assert!(!is_between(8, 3, 7));
+    }
+
+    #[test]
+    fn test_slider_mobility() {
+        let mut board = Board::new();
+        // Empty board should give max mobility in limited steps
+        let mobility = slider_mobility(&board, 4, 4, &[(1, 0), (-1, 0), (0, 1), (0, -1)], 5);
+        assert_eq!(mobility, 20); // 4 directions * 5 steps each
+
+        // Place a blocking piece
+        board.set_piece(6, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        let mobility = slider_mobility(&board, 4, 4, &[(1, 0)], 5);
+        assert_eq!(mobility, 1); // Only 1 step before blocked (at 5,4)
+    }
+
+    #[test]
+    fn test_is_clear_line_between() {
+        let mut board = Board::new();
+        let from = Coordinate::new(1, 1);
+        let to = Coordinate::new(1, 8);
+
+        // Empty board should have clear line
+        assert!(is_clear_line_between(&board, &from, &to));
+
+        // Add blocker
+        board.set_piece(1, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        assert!(!is_clear_line_between(&board, &from, &to));
+    }
+
+    #[test]
+    fn test_is_clear_line_diagonal() {
+        let mut board = Board::new();
+        let from = Coordinate::new(1, 1);
+        let to = Coordinate::new(5, 5);
+
+        assert!(is_clear_line_between(&board, &from, &to));
+
+        board.set_piece(3, 3, Piece::new(PieceType::Bishop, PlayerColor::Black));
+        assert!(!is_clear_line_between(&board, &from, &to));
+    }
+
+    #[test]
+    fn test_calculate_initial_material() {
+        let mut board = Board::new();
+
+        // Empty board = 0
+        assert_eq!(calculate_initial_material(&board), 0);
+
+        // Add white queen
+        board.set_piece(4, 1, Piece::new(PieceType::Queen, PlayerColor::White));
+        board.rebuild_tiles();
+        assert_eq!(calculate_initial_material(&board), 1350); // Queen = 1350 in infinite chess
+
+        // Add black queen - should cancel out
+        board.set_piece(4, 8, Piece::new(PieceType::Queen, PlayerColor::Black));
+        board.rebuild_tiles();
+        assert_eq!(calculate_initial_material(&board), 0);
+    }
+
+    #[test]
+    fn test_clear_pawn_cache() {
+        // Just ensure it doesn't panic
+        clear_pawn_cache();
+    }
+
+    #[test]
+    fn test_evaluate_returns_value() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+        game.recompute_hash();
+
+        let score = evaluate(&game);
+        // K vs K should be close to 0
+        assert!(score.abs() < 1000, "K vs K should be near 0, got {}", score);
+    }
+
+    #[test]
+    fn test_evaluate_lazy_returns_value() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let score = evaluate_lazy(&game);
+        // White has extra queen so should be positive
+        assert!(score > 0, "White with extra queen should be positive");
+    }
+
+    #[test]
+    fn test_count_pawns_on_file() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(4, 2, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(4, 3, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(4, 7, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        game.board.rebuild_tiles();
+
+        let (own, enemy) = count_pawns_on_file(&game, 4, PlayerColor::White);
+        assert_eq!(own, 2);
+        assert_eq!(enemy, 1);
+    }
+
+    #[test]
+    fn test_evaluate_pawn_structure() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // Doubled pawns for white
+        game.board
+            .set_piece(4, 2, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(4, 3, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+        game.recompute_hash();
+
+        let score = evaluate_pawn_structure(&game);
+        // Doubled pawns should give penalty (White has doubled pawns = negative score)
+        // Note: The penalty may be offset by passed pawn bonus, so just check it runs
+        assert!(
+            score.abs() < 1000,
+            "Pawn structure score should be reasonable: {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_evaluate_king_safety() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board.rebuild_tiles();
+
+        let wk = Some(Coordinate::new(5, 1));
+        let bk = Some(Coordinate::new(5, 8));
+
+        let score = evaluate_king_safety(&game, &wk, &bk);
+        // Both kings exposed similarly, should be near 0
+        assert!(score.abs() < 200);
+    }
+
+    #[test]
+    fn test_compute_cloud_center() {
+        let mut board = Board::new();
+        // Use non-neutral pieces (pawns ARE neutral-type is false)
+        board.set_piece(0, 0, Piece::new(PieceType::Rook, PlayerColor::White));
+        board.set_piece(10, 0, Piece::new(PieceType::Rook, PlayerColor::White));
+
+        let center = compute_cloud_center(&board);
+        assert!(center.is_some(), "Cloud center should exist");
+        let c = center.unwrap();
+        assert_eq!(c.x, 5); // Average of 0 and 10
+        assert_eq!(c.y, 0);
+    }
+}

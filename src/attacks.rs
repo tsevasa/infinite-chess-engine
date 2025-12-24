@@ -321,4 +321,120 @@ mod tests {
         assert_eq!(CAMEL_OFFSETS.len(), 8);
         assert_eq!(HAWK_OFFSETS.len(), 16);
     }
+
+    #[test]
+    fn test_attacks_like_knight() {
+        assert!(attacks_like_knight(PieceType::Knight));
+        assert!(attacks_like_knight(PieceType::Chancellor));
+        assert!(attacks_like_knight(PieceType::Archbishop));
+        assert!(attacks_like_knight(PieceType::Amazon));
+        assert!(attacks_like_knight(PieceType::Centaur));
+        assert!(attacks_like_knight(PieceType::RoyalCentaur));
+
+        assert!(!attacks_like_knight(PieceType::King));
+        assert!(!attacks_like_knight(PieceType::Queen));
+        assert!(!attacks_like_knight(PieceType::Rook));
+        assert!(!attacks_like_knight(PieceType::Bishop));
+        assert!(!attacks_like_knight(PieceType::Pawn));
+    }
+
+    #[test]
+    fn test_attacks_like_king() {
+        assert!(attacks_like_king(PieceType::King));
+        assert!(attacks_like_king(PieceType::Guard));
+        assert!(attacks_like_king(PieceType::Centaur));
+        assert!(attacks_like_king(PieceType::RoyalCentaur));
+
+        assert!(!attacks_like_king(PieceType::Knight));
+        assert!(!attacks_like_king(PieceType::Queen));
+        assert!(!attacks_like_king(PieceType::Rook));
+    }
+
+    #[test]
+    fn test_is_ortho_slider() {
+        assert!(is_ortho_slider(PieceType::Rook));
+        assert!(is_ortho_slider(PieceType::Queen));
+        assert!(is_ortho_slider(PieceType::Chancellor));
+        assert!(is_ortho_slider(PieceType::Amazon));
+        assert!(is_ortho_slider(PieceType::RoyalQueen));
+
+        assert!(!is_ortho_slider(PieceType::Bishop));
+        assert!(!is_ortho_slider(PieceType::Knight));
+        assert!(!is_ortho_slider(PieceType::Pawn));
+    }
+
+    #[test]
+    fn test_is_diag_slider() {
+        assert!(is_diag_slider(PieceType::Bishop));
+        assert!(is_diag_slider(PieceType::Queen));
+        assert!(is_diag_slider(PieceType::Archbishop));
+        assert!(is_diag_slider(PieceType::Amazon));
+        assert!(is_diag_slider(PieceType::RoyalQueen));
+
+        assert!(!is_diag_slider(PieceType::Rook));
+        assert!(!is_diag_slider(PieceType::Knight));
+        assert!(!is_diag_slider(PieceType::Pawn));
+    }
+
+    #[test]
+    fn test_is_slider() {
+        // Ortho only
+        assert!(is_slider(PieceType::Rook));
+        // Diag only
+        assert!(is_slider(PieceType::Bishop));
+        // Both
+        assert!(is_slider(PieceType::Queen));
+        assert!(is_slider(PieceType::Amazon));
+        // Neither
+        assert!(!is_slider(PieceType::Knight));
+        assert!(!is_slider(PieceType::Pawn));
+        assert!(!is_slider(PieceType::King));
+    }
+
+    #[test]
+    fn test_make_mask() {
+        let mask = make_mask(&[PieceType::Pawn, PieceType::King]);
+        assert!(matches_mask(PieceType::Pawn, mask));
+        assert!(matches_mask(PieceType::King, mask));
+        assert!(!matches_mask(PieceType::Queen, mask));
+    }
+
+    #[test]
+    fn test_king_mask() {
+        assert!(matches_mask(PieceType::King, KING_MASK));
+        assert!(matches_mask(PieceType::Guard, KING_MASK));
+        assert!(!matches_mask(PieceType::Knight, KING_MASK));
+    }
+
+    #[test]
+    fn test_leaper_masks() {
+        assert!(matches_mask(PieceType::Camel, CAMEL_MASK));
+        assert!(!matches_mask(PieceType::Knight, CAMEL_MASK));
+
+        assert!(matches_mask(PieceType::Giraffe, GIRAFFE_MASK));
+        assert!(!matches_mask(PieceType::Knight, GIRAFFE_MASK));
+
+        assert!(matches_mask(PieceType::Zebra, ZEBRA_MASK));
+        assert!(!matches_mask(PieceType::Knight, ZEBRA_MASK));
+
+        assert!(matches_mask(PieceType::Hawk, HAWK_MASK));
+        assert!(!matches_mask(PieceType::Knight, HAWK_MASK));
+    }
+
+    #[test]
+    fn test_attacker_arrays() {
+        assert_eq!(KNIGHT_ATTACKERS.len(), 6);
+        assert_eq!(KING_ATTACKERS.len(), 4);
+        assert_eq!(ORTHO_ATTACKERS.len(), 5);
+        assert_eq!(DIAG_ATTACKERS.len(), 5);
+    }
+
+    #[test]
+    fn test_direction_arrays() {
+        assert_eq!(ORTHO_DIRS.len(), 4);
+        assert_eq!(DIAG_DIRS.len(), 4);
+        assert_eq!(KNIGHTRIDER_DIRS.len(), 8);
+        assert_eq!(ZEBRA_OFFSETS.len(), 8);
+        assert_eq!(GIRAFFE_OFFSETS.len(), 8);
+    }
 }

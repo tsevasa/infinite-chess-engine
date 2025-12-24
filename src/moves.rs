@@ -377,7 +377,7 @@ impl Default for SpatialIndices {
 
 /// Compact move representation - Copy-able for zero-allocation cloning in hot loops.
 /// Uses Option<PieceType> instead of Option<String> for promotion.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Move {
     pub from: Coordinate,
     pub to: Coordinate,
@@ -3110,4 +3110,654 @@ fn generate_huygen_moves_into(
 ) {
     let moves = generate_huygen_moves(board, from, piece, indices, fallback);
     out.extend(moves);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ======================== Bounds Tests ========================
+
+    #[test]
+    fn test_in_bounds_default() {
+        // Default bounds are very large (-1e15 to 1e15)
+        assert!(in_bounds(0, 0));
+        assert!(in_bounds(1000, 1000));
+        assert!(in_bounds(-1000, -1000));
+        assert!(in_bounds(1_000_000_000, 1_000_000_000));
+    }
+
+    #[test]
+    fn test_set_world_bounds() {
+        // Set custom bounds
+        set_world_bounds(-100, 100, -50, 50);
+
+        assert!(in_bounds(0, 0));
+        assert!(in_bounds(100, 50));
+        assert!(in_bounds(-100, -50));
+        assert!(!in_bounds(101, 0));
+        assert!(!in_bounds(0, 51));
+
+        // Reset to large defaults
+        set_world_bounds(
+            -1_000_000_000_000_000,
+            1_000_000_000_000_000,
+            -1_000_000_000_000_000,
+            1_000_000_000_000_000,
+        );
+    }
+
+    #[test]
+    fn test_get_world_size() {
+        set_world_bounds(-100, 100, -50, 50);
+        let size = get_world_size();
+        assert_eq!(size, 200, "Width is larger than height");
+
+        // Reset
+        set_world_bounds(
+            -1_000_000_000_000_000,
+            1_000_000_000_000_000,
+            -1_000_000_000_000_000,
+            1_000_000_000_000_000,
+        );
+    }
+
+    #[test]
+    fn test_get_coord_bounds() {
+        set_world_bounds(-10, 20, -30, 40);
+        let (min_x, max_x, min_y, max_y) = get_coord_bounds();
+        assert_eq!(min_x, -10);
+        assert_eq!(max_x, 20);
+        assert_eq!(min_y, -30);
+        assert_eq!(max_y, 40);
+
+        // Reset
+        set_world_bounds(
+            -1_000_000_000_000_000,
+            1_000_000_000_000_000,
+            -1_000_000_000_000_000,
+            1_000_000_000_000_000,
+        );
+    }
+
+    // ======================== SpatialIndices Tests ========================
+
+    #[test]
+    fn test_spatial_indices_new_empty() {
+        let board = Board::new();
+        let indices = SpatialIndices::new(&board);
+
+        assert!(indices.rows.is_empty());
+        assert!(indices.cols.is_empty());
+        assert!(indices.diag1.is_empty());
+        assert!(indices.diag2.is_empty());
+    }
+
+    #[test]
+    fn test_spatial_indices_add_remove() {
+        let mut indices = SpatialIndices::default();
+        let packed = Piece::new(PieceType::Rook, PlayerColor::White).packed();
+
+        // Add piece at (5, 10)
+        indices.add(5, 10, packed);
+
+        // Check it's in all the right indices
+        assert!(indices.rows.get(&10).is_some());
+        assert!(indices.cols.get(&5).is_some());
+        assert!(indices.diag1.get(&-5).is_some()); // 5 - 10 = -5
+        assert!(indices.diag2.get(&15).is_some()); // 5 + 10 = 15
+
+        // Remove it
+        indices.remove(5, 10);
+
+        // Check it's removed from all indices
+        assert!(indices.rows.get(&10).map(|v| v.is_empty()).unwrap_or(true));
+        assert!(indices.cols.get(&5).map(|v| v.is_empty()).unwrap_or(true));
+    }
+
+    #[test]
+    fn test_spatial_indices_find_nearest_forward() {
+        let vec = vec![(0, 1), (5, 2), (10, 3), (20, 4)];
+
+        // Find nearest forward from position 3
+        let result = SpatialIndices::find_nearest(&vec, 3, 1);
+        assert_eq!(result, Some((5, 2)), "Should find piece at coord 5");
+
+        // Find nearest forward from position 10
+        let result = SpatialIndices::find_nearest(&vec, 10, 1);
+        assert_eq!(result, Some((20, 4)), "Should find piece at coord 20");
+    }
+
+    #[test]
+    fn test_spatial_indices_find_nearest_backward() {
+        let vec = vec![(0, 1), (5, 2), (10, 3), (20, 4)];
+
+        // Find nearest backward from position 7
+        let result = SpatialIndices::find_nearest(&vec, 7, -1);
+        assert_eq!(result, Some((5, 2)), "Should find piece at coord 5");
+
+        // Find nearest backward from position 0
+        let result = SpatialIndices::find_nearest(&vec, 0, -1);
+        assert_eq!(result, None, "No piece before 0");
+    }
+
+    #[test]
+    fn test_spatial_indices_find_nearest_at_extreme_distance() {
+        // Test with large coordinates (infinite chess scale)
+        let vec = vec![(-1_000_000, 1), (0, 2), (1_000_000, 3)];
+
+        let result = SpatialIndices::find_nearest(&vec, 0, 1);
+        assert_eq!(result, Some((1_000_000, 3)), "Should find distant piece");
+
+        let result = SpatialIndices::find_nearest(&vec, 0, -1);
+        assert_eq!(
+            result,
+            Some((-1_000_000, 1)),
+            "Should find distant piece backward"
+        );
+    }
+
+    // ======================== Move Generation Tests ========================
+
+    #[test]
+    fn test_move_new() {
+        let from = Coordinate::new(1, 2);
+        let to = Coordinate::new(3, 4);
+        let piece = Piece::new(PieceType::Knight, PlayerColor::White);
+
+        let m = Move::new(from, to, piece);
+
+        assert_eq!(m.from.x, 1);
+        assert_eq!(m.from.y, 2);
+        assert_eq!(m.to.x, 3);
+        assert_eq!(m.to.y, 4);
+        assert!(m.promotion.is_none());
+        assert!(m.rook_coord.is_none());
+    }
+
+    #[test]
+    fn test_is_enemy_piece_detection() {
+        let white_knight = Piece::new(PieceType::Knight, PlayerColor::White);
+        let black_knight = Piece::new(PieceType::Knight, PlayerColor::Black);
+        let void = Piece::new(PieceType::Void, PlayerColor::Neutral);
+
+        // White sees black as enemy
+        assert!(is_enemy_piece(&black_knight, PlayerColor::White));
+        // Black sees white as enemy
+        assert!(is_enemy_piece(&white_knight, PlayerColor::Black));
+        // Same color is not enemy
+        assert!(!is_enemy_piece(&white_knight, PlayerColor::White));
+        // Void is not enemy (it's neutral, but also blocked by piece type check)
+        assert!(!is_enemy_piece(&void, PlayerColor::White));
+    }
+
+    #[test]
+    fn test_slider_detection_at_distance() {
+        // Test that SpatialIndices can find pieces at large distances
+        // This is the foundation for slider attack detection in infinite chess
+        let mut board = Board::new();
+        board.set_piece(0, 0, Piece::new(PieceType::Rook, PlayerColor::White));
+        board.set_piece(1000, 0, Piece::new(PieceType::King, PlayerColor::Black));
+
+        let indices = SpatialIndices::new(&board);
+
+        // The row should have both pieces
+        let row = indices.rows.get(&0).unwrap();
+        assert_eq!(row.len(), 2, "Row should have 2 pieces");
+
+        // Find nearest from rook position toward king
+        let result = SpatialIndices::find_nearest(row, 0, 1);
+        assert_eq!(
+            result.map(|(c, _)| c),
+            Some(1000),
+            "Should find king at x=1000"
+        );
+    }
+
+    #[test]
+    fn test_knight_moves_generation() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Knight, PlayerColor::White));
+
+        let from = Coordinate::new(4, 4);
+        let piece = Piece::new(PieceType::Knight, PlayerColor::White);
+
+        let mut moves = MoveList::new();
+        generate_leaper_moves_into(&board, &from, &piece, 1, 2, &mut moves);
+
+        // Knight has 8 possible moves from center
+        assert_eq!(moves.len(), 8, "Knight should have 8 moves from (4,4)");
+
+        // Check specific squares
+        let expected = [
+            (5, 6),
+            (6, 5),
+            (6, 3),
+            (5, 2),
+            (3, 2),
+            (2, 3),
+            (2, 5),
+            (3, 6),
+        ];
+        for (x, y) in expected {
+            assert!(
+                moves.iter().any(|m| m.to.x == x && m.to.y == y),
+                "Knight should be able to move to ({}, {})",
+                x,
+                y
+            );
+        }
+    }
+
+    #[test]
+    fn test_king_moves_generation() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::King, PlayerColor::White));
+
+        let from = Coordinate::new(4, 4);
+        let piece = Piece::new(PieceType::King, PlayerColor::White);
+
+        let mut moves = MoveList::new();
+        generate_compass_moves_into(&board, &from, &piece, 1, &mut moves);
+
+        // King has 8 possible moves from center
+        assert_eq!(moves.len(), 8, "King should have 8 moves from (4,4)");
+    }
+
+    #[test]
+    fn test_fairy_piece_camel() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Camel, PlayerColor::White));
+
+        let from = Coordinate::new(4, 4);
+        let piece = Piece::new(PieceType::Camel, PlayerColor::White);
+
+        let mut moves = MoveList::new();
+        generate_leaper_moves_into(&board, &from, &piece, 1, 3, &mut moves);
+
+        // Camel leaps (1,3) - 8 squares
+        assert_eq!(moves.len(), 8, "Camel should have 8 moves from (4,4)");
+
+        // Check a specific camel square
+        assert!(
+            moves.iter().any(|m| m.to.x == 5 && m.to.y == 7),
+            "Camel should be able to move to (5, 7)"
+        );
+    }
+
+    #[test]
+    fn test_fairy_piece_zebra() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Zebra, PlayerColor::White));
+
+        let from = Coordinate::new(4, 4);
+        let piece = Piece::new(PieceType::Zebra, PlayerColor::White);
+
+        let mut moves = MoveList::new();
+        generate_leaper_moves_into(&board, &from, &piece, 2, 3, &mut moves);
+
+        // Zebra leaps (2,3) - 8 squares
+        assert_eq!(moves.len(), 8, "Zebra should have 8 moves from (4,4)");
+    }
+
+    #[test]
+    fn test_negative_coordinates() {
+        // Test that piece at negative coordinates generates moves correctly
+        let mut board = Board::new();
+        board.set_piece(
+            -100,
+            -100,
+            Piece::new(PieceType::Knight, PlayerColor::White),
+        );
+
+        let from = Coordinate::new(-100, -100);
+        let piece = Piece::new(PieceType::Knight, PlayerColor::White);
+
+        let mut moves = MoveList::new();
+        generate_leaper_moves_into(&board, &from, &piece, 1, 2, &mut moves);
+
+        assert_eq!(
+            moves.len(),
+            8,
+            "Knight at negative coords should have 8 moves"
+        );
+
+        // Check one of the expected squares
+        assert!(
+            moves.iter().any(|m| m.to.x == -99 && m.to.y == -98),
+            "Knight should be able to move to (-99, -98)"
+        );
+    }
+
+    #[test]
+    fn test_is_enemy_piece() {
+        let white_pawn = Piece::new(PieceType::Pawn, PlayerColor::White);
+        let black_pawn = Piece::new(PieceType::Pawn, PlayerColor::Black);
+
+        assert!(!is_enemy_piece(&white_pawn, PlayerColor::White));
+        assert!(is_enemy_piece(&black_pawn, PlayerColor::White));
+        assert!(is_enemy_piece(&white_pawn, PlayerColor::Black));
+    }
+
+    #[test]
+    fn test_generate_pawn_moves() {
+        use crate::game::PromotionRanks;
+
+        let mut board = Board::new();
+        board.set_piece(4, 2, Piece::new(PieceType::Pawn, PlayerColor::White));
+        board.set_piece(5, 3, Piece::new(PieceType::Pawn, PlayerColor::Black)); // Capture target
+
+        let from = Coordinate::new(4, 2);
+        let piece = Piece::new(PieceType::Pawn, PlayerColor::White);
+
+        let mut rules = GameRules::default();
+        rules.promotions_allowed = Some(vec!["queens".to_string()]);
+        rules.promotion_ranks = Some(PromotionRanks {
+            white: vec![8],
+            black: vec![1],
+        });
+
+        let special = FxHashSet::default();
+        let moves = generate_pawn_moves(&board, &from, &piece, &special, &None, &rules);
+
+        assert!(moves.len() >= 2, "Pawn should have at least 2 moves");
+        // Should include forward move and capture
+        assert!(
+            moves.iter().any(|m| m.to.y == 3 && m.to.x == 4),
+            "Forward move"
+        );
+        assert!(moves.iter().any(|m| m.to.y == 3 && m.to.x == 5), "Capture");
+    }
+
+    #[test]
+    fn test_generate_sliding_moves_rook() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        board.rebuild_tiles();
+
+        let from = Coordinate::new(4, 4);
+        let piece = Piece::new(PieceType::Rook, PlayerColor::White);
+        let indices = SpatialIndices::new(&board);
+
+        let ortho = &[(1, 0), (-1, 0), (0, 1), (0, -1)];
+        let moves = generate_sliding_moves(&board, &from, &piece, ortho, &indices, true, None);
+
+        // Rook on empty board should have many moves (limited by fallback)
+        assert!(moves.len() > 0, "Rook should have some moves");
+    }
+
+    #[test]
+    fn test_generate_sliding_moves_bishop() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Bishop, PlayerColor::White));
+        board.rebuild_tiles();
+
+        let from = Coordinate::new(4, 4);
+        let piece = Piece::new(PieceType::Bishop, PlayerColor::White);
+        let indices = SpatialIndices::new(&board);
+
+        let diag = &[(1, 1), (1, -1), (-1, 1), (-1, -1)];
+        let moves = generate_sliding_moves(&board, &from, &piece, diag, &indices, true, None);
+
+        assert!(moves.len() > 0, "Bishop should have some moves");
+    }
+
+    #[test]
+    fn test_is_square_attacked_by_knight() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Knight, PlayerColor::White));
+        board.rebuild_tiles();
+
+        let indices = SpatialIndices::new(&board);
+        let target_attacked = Coordinate::new(5, 6); // Knight can attack this
+        let target_not_attacked = Coordinate::new(4, 5); // Knight cannot attack this
+
+        assert!(is_square_attacked(
+            &board,
+            &target_attacked,
+            PlayerColor::White,
+            &indices
+        ));
+        assert!(!is_square_attacked(
+            &board,
+            &target_not_attacked,
+            PlayerColor::White,
+            &indices
+        ));
+    }
+
+    #[test]
+    fn test_is_square_attacked_by_rook() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        board.rebuild_tiles();
+
+        let indices = SpatialIndices::new(&board);
+        let target_file = Coordinate::new(4, 10); // Same file
+        let target_rank = Coordinate::new(10, 4); // Same rank
+
+        assert!(is_square_attacked(
+            &board,
+            &target_file,
+            PlayerColor::White,
+            &indices
+        ));
+        assert!(is_square_attacked(
+            &board,
+            &target_rank,
+            PlayerColor::White,
+            &indices
+        ));
+    }
+
+    #[test]
+    fn test_is_square_attacked_blocked() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        board.set_piece(4, 6, Piece::new(PieceType::Pawn, PlayerColor::White)); // Blocker
+        board.rebuild_tiles();
+
+        let indices = SpatialIndices::new(&board);
+        let target_blocked = Coordinate::new(4, 10); // Blocked by pawn at (4,6)
+
+        assert!(!is_square_attacked(
+            &board,
+            &target_blocked,
+            PlayerColor::White,
+            &indices
+        ));
+    }
+
+    #[test]
+    fn test_generate_castling_moves() {
+        let mut board = Board::new();
+        board.set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        board.set_piece(8, 1, Piece::new(PieceType::Rook, PlayerColor::White)); // Kingside rook
+        board.rebuild_tiles();
+
+        let from = Coordinate::new(5, 1);
+        let piece = Piece::new(PieceType::King, PlayerColor::White);
+
+        let mut special = FxHashSet::default();
+        special.insert(Coordinate::new(5, 1)); // King has special right
+        special.insert(Coordinate::new(8, 1)); // Rook has special right
+
+        let indices = SpatialIndices::new(&board);
+        let moves = generate_castling_moves(&board, &from, &piece, &special, &indices);
+
+        // Test that the function runs without panicking and returns a MoveList
+        // Castling availability depends on variant rules and board state
+        let _ = moves.len();
+    }
+
+    #[test]
+    fn test_ray_border_distance() {
+        let from = Coordinate::new(0, 0);
+
+        // Moving right (positive x)
+        let dist = ray_border_distance(&from, 1, 0);
+        assert!(dist.is_some());
+        assert!(dist.unwrap() > 0);
+    }
+
+    #[test]
+    fn test_extend_captures_only() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Knight, PlayerColor::White));
+        board.set_piece(5, 6, Piece::new(PieceType::Pawn, PlayerColor::Black)); // Capture target
+
+        let mut all_moves = MoveList::new();
+        let from = Coordinate::new(4, 4);
+        let piece = Piece::new(PieceType::Knight, PlayerColor::White);
+        generate_leaper_moves_into(&board, &from, &piece, 1, 2, &mut all_moves);
+
+        let mut captures_only = MoveList::new();
+        extend_captures_only(&board, PlayerColor::White, all_moves, &mut captures_only);
+
+        // Should have exactly 1 capture (the pawn at 5,6)
+        assert_eq!(captures_only.len(), 1);
+    }
+
+    #[test]
+    fn test_extend_quiets_only() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Knight, PlayerColor::White));
+        board.set_piece(5, 6, Piece::new(PieceType::Pawn, PlayerColor::Black)); // Capture target
+
+        let mut all_moves = MoveList::new();
+        let from = Coordinate::new(4, 4);
+        let piece = Piece::new(PieceType::Knight, PlayerColor::White);
+        generate_leaper_moves_into(&board, &from, &piece, 1, 2, &mut all_moves);
+
+        let mut quiets_only = MoveList::new();
+        extend_quiets_only(&board, all_moves, &mut quiets_only);
+
+        // Should have 7 quiet moves (8 total - 1 capture)
+        assert_eq!(quiets_only.len(), 7);
+    }
+
+    #[test]
+    fn test_generate_compass_moves() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Hawk, PlayerColor::White));
+
+        let from = Coordinate::new(4, 4);
+        let piece = Piece::new(PieceType::Hawk, PlayerColor::White);
+
+        let moves = generate_compass_moves(&board, &from, &piece, 2);
+
+        // Distance 2 compass should have 8 moves (4 ortho + 4 diag)
+        assert_eq!(moves.len(), 8);
+    }
+
+    #[test]
+    fn test_spatial_indices_default() {
+        let indices = SpatialIndices::default();
+        assert!(indices.rows.is_empty());
+        assert!(indices.cols.is_empty());
+        assert!(indices.diag1.is_empty());
+        assert!(indices.diag2.is_empty());
+    }
+
+    #[test]
+    fn test_find_blocker_via_indices() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        board.set_piece(4, 8, Piece::new(PieceType::Pawn, PlayerColor::White)); // Blocker
+        board.rebuild_tiles();
+
+        let from = Coordinate::new(4, 4);
+        let indices = SpatialIndices::new(&board);
+
+        // Looking up (positive y)
+        let (dist, captures) =
+            find_blocker_via_indices(&board, &from, 0, 1, &indices, PlayerColor::White);
+
+        assert!(dist > 0, "Should find a blocker");
+        assert!(!captures, "Own piece should not be a capture");
+    }
+
+    #[test]
+    fn test_generate_knightrider_moves() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Knightrider, PlayerColor::White));
+
+        let from = Coordinate::new(4, 4);
+        let piece = Piece::new(PieceType::Knightrider, PlayerColor::White);
+
+        let moves = generate_knightrider_moves(&board, &from, &piece);
+
+        // Knightrider should have at least 8 moves (the initial knight squares)
+        assert!(moves.len() >= 8, "Knightrider should have at least 8 moves");
+    }
+
+    #[test]
+    fn test_generate_rose_moves() {
+        let mut board = Board::new();
+        board.set_piece(4, 4, Piece::new(PieceType::Rose, PlayerColor::White));
+
+        let from = Coordinate::new(4, 4);
+        let piece = Piece::new(PieceType::Rose, PlayerColor::White);
+
+        let moves = generate_rose_moves(&board, &from, &piece);
+
+        assert!(moves.len() > 0, "Rose should have some moves");
+    }
+
+    #[test]
+    fn test_get_legal_moves() {
+        use crate::game::GameRules;
+
+        let mut board = Board::new();
+        board.set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        board.set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        board.set_piece(4, 2, Piece::new(PieceType::Pawn, PlayerColor::White));
+        board.rebuild_tiles();
+
+        let indices = SpatialIndices::new(&board);
+        let special = FxHashSet::default();
+        let rules = GameRules::default();
+
+        let moves = get_legal_moves(
+            &board,
+            PlayerColor::White,
+            &special,
+            &None,
+            &rules,
+            &indices,
+            Some(&Coordinate::new(5, 8)),
+        );
+
+        assert!(moves.len() > 0, "White should have legal moves");
+    }
+
+    #[test]
+    fn test_get_quiescence_captures() {
+        use crate::game::GameRules;
+
+        let mut board = Board::new();
+        board.set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        board.set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        board.set_piece(4, 4, Piece::new(PieceType::Knight, PlayerColor::White));
+        board.set_piece(5, 6, Piece::new(PieceType::Pawn, PlayerColor::Black)); // Capture target
+        board.rebuild_tiles();
+
+        let indices = SpatialIndices::new(&board);
+        let special = FxHashSet::default();
+        let rules = GameRules::default();
+
+        let mut captures = MoveList::new();
+        get_quiescence_captures(
+            &board,
+            PlayerColor::White,
+            &special,
+            &None,
+            &rules,
+            &indices,
+            &mut captures,
+        );
+
+        // Should find the knight capture
+        assert!(captures.len() > 0, "Should find capture moves");
+    }
 }
