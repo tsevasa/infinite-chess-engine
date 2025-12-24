@@ -468,16 +468,16 @@ pub struct Searcher {
     pub killers: Vec<[Option<Move>; 2]>,
 
     // History heuristic [piece_type][to_square_hash]
-    pub history: [[i32; 256]; 32],
+    pub history: Box<[[i32; 256]; 32]>,
 
     // Capture history [moving_piece_type][captured_piece_type]
     // Used to improve capture ordering beyond pure MVV-LVA
-    pub capture_history: [[i32; 32]; 32],
+    pub capture_history: Box<[[i32; 32]; 32]>,
 
     // Countermove heuristic [prev_from_hash][prev_to_hash] -> (piece_type, to_x, to_y)
     // Stores the move that refuted the previous move (for quiet beta cutoffs).
     // Using (u8, i16, i16) to store piece type and destination coords.
-    pub countermoves: [[(u8, i16, i16); 256]; 256],
+    pub countermoves: Box<[[(u8, i16, i16); 256]; 256]>,
 
     // Previous move info for countermove heuristic (from_hash, to_hash)
     pub prev_move_stack: Vec<(usize, usize)>,
@@ -574,9 +574,9 @@ impl Searcher {
             pv_table,
             pv_length: [0; MAX_PLY],
             killers,
-            history: [[0; 256]; 32],
-            capture_history: [[0; 32]; 32],
-            countermoves: [[(0, 0, 0); 256]; 256],
+            history: Box::new([[0; 256]; 32]),
+            capture_history: Box::new([[0; 32]; 32]),
+            countermoves: Box::new([[(0, 0, 0); 256]; 256]),
             prev_move_stack: vec![(0, 0); MAX_PLY],
             eval_stack: vec![0; MAX_PLY],
             best_move_root: None,
@@ -632,7 +632,7 @@ impl Searcher {
 
     /// Decay history scores at the start of each iteration
     pub fn decay_history(&mut self) {
-        for row in &mut self.history {
+        for row in self.history.iter_mut() {
             for val in row.iter_mut() {
                 *val = *val * 9 / 10; // Decay by 10%
             }
@@ -3379,54 +3379,80 @@ mod tests {
         assert_eq!(probed_move.unwrap().from.x, 0);
     }
 
-    // #[test]
-    // fn test_search_mate_in_one() {
-    //     let mut game = GameState::new();
-    //     game.board = Board::new();
+    #[test]
+    fn test_search_mate_in_one() {
+        let mut game = GameState::new();
+        game.board = Board::new();
 
-    //     let kx = 10;
-    //     let ky = 10;
-    //     // Black king at (10,10)
-    //     game.board
-    //         .set_piece(kx, ky, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(0, 0, Piece::new(PieceType::King, PlayerColor::Black));
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                game.board
+                    .set_piece(dx, dy, Piece::new(PieceType::Pawn, PlayerColor::Black));
+            }
+        }
 
-    //     // Surrounding black king with black pawns
-    //     for dx in -1..=1 {
-    //         for dy in -1..=1 {
-    //             if dx == 0 && dy == 0 {
-    //                 continue;
-    //             }
-    //             game.board.set_piece(
-    //                 kx + dx,
-    //                 ky + dy,
-    //                 Piece::new(PieceType::Pawn, PlayerColor::Black),
-    //             );
-    //         }
-    //     }
+        game.board.remove_piece(&0, &1);
+        game.board
+            .set_piece(-5, -5, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 5, Piece::new(PieceType::Rook, PlayerColor::White));
 
-    //     // White King far away
-    //     game.board
-    //         .set_piece(0, 0, Piece::new(PieceType::King, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
 
-    //     // White Rook at (kx + 5, ky).
-    //     game.board
-    //         .set_piece(kx + 5, ky, Piece::new(PieceType::Rook, PlayerColor::White));
+        assert_eq!(
+            game.white_piece_count, 2,
+            "Should have 2 white pieces (King, Rook)"
+        );
+        assert!(
+            game.black_piece_count >= 8,
+            "Should have at least 8 black pieces"
+        );
+        assert!(
+            game.black_king_pos.is_some(),
+            "Black king position must be detected"
+        );
+        assert!(
+            game.white_king_pos.is_some(),
+            "White king position must be detected"
+        );
 
-    //     game.turn = PlayerColor::White;
-    //     game.recompute_piece_counts();
-    //     game.recompute_hash();
-    //     game.board.rebuild_tiles();
+        game.recompute_hash();
+        game.board.rebuild_tiles();
 
-    //     // Search depth 3 should find mate
-    //     let result = get_best_move(&mut game, 3, 1000, true);
-    //     assert!(result.is_some());
-    //     let (_best_move, score, _stats) = result.unwrap();
-    //     assert!(
-    //         score > 29000,
-    //         "Should detect mate score (>29000), got {}",
-    //         score
-    //     );
-    // }
+        // Verification: ensure move generation works
+        let moves = game.get_legal_moves();
+        assert!(
+            !moves.is_empty(),
+            "White should have legal moves, found 0. Piece counts: W={}, B={}",
+            game.white_piece_count,
+            game.black_piece_count
+        );
+        assert!(!moves.is_empty(), "White should have legal moves, found 0");
+
+        // Search depth 3 to be absolutely sure
+        let result = get_best_move(&mut game, 3, 2000, true);
+        assert!(
+            result.is_some(),
+            "Search returned None even though legal moves exist"
+        );
+        let (best_move, score, _stats) = result.unwrap();
+
+        // Should find the mate move to (0,5)
+        assert_eq!(best_move.to.x, 0);
+        assert_eq!(best_move.to.y, 5);
+
+        assert!(
+            score > 800000,
+            "Should detect mate score (>800000), got {}",
+            score
+        );
+    }
     #[test]
     fn test_quiescence_search_depth() {
         let mut searcher = Searcher::new(1000);
