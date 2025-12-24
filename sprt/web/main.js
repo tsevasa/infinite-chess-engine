@@ -289,7 +289,7 @@ function getStandardPosition() {
         halfmove_clock: 0,
         fullmove_number: 1,
         move_history: [],
-        game_rules: null,
+        game_rules: variantData.game_rules,
         world_bounds: null,
     };
 }

@@ -1085,18 +1085,27 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
         return (0, false, false);
     }
 
-    let white_pieces = game.white_piece_count.saturating_sub(game.white_pawn_count);
-    let black_pieces = game.black_piece_count.saturating_sub(game.black_pawn_count);
+    // Piece count for scaling (non-pawn, non-royal units)
+    let white_royals = if game.white_king_pos.is_some() { 1 } else { 0 };
+    let black_royals = if game.black_king_pos.is_some() { 1 } else { 0 };
+    let white_pieces = game
+        .white_piece_count
+        .saturating_sub(game.white_pawn_count)
+        .saturating_sub(white_royals);
+    let black_pieces = game
+        .black_piece_count
+        .saturating_sub(game.black_pawn_count)
+        .saturating_sub(black_royals);
     let total_pieces = white_pieces + black_pieces;
 
-    // Multiplier for pawn positional terms: 20+ pieces -> 10%, <5 pieces -> 100%
-    let multiplier_q = if total_pieces >= 20 {
+    // Multiplier for pawn advancement terms: 10+ pieces -> 10%, <5 pieces -> 100%
+    let multiplier_q = if total_pieces >= 10 {
         10
     } else if total_pieces <= 5 {
         100
     } else {
-        // Linear interpolation between (5, 100) and (20, 10)
-        100 - (total_pieces - 5) as i32 * 6
+        // Linear interpolation between (5, 100) and (10, 10)
+        100 - (total_pieces - 5) as i32 * 18
     };
 
     let mut white_max_y = i64::MIN;
@@ -1107,7 +1116,8 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
     let mut w_to_find = game.white_pawn_count as i32;
     let mut b_to_find = game.black_pawn_count as i32;
 
-    let mut raw_score = 0;
+    let mut bonus_score = 0; // Scaled terms (advancement)
+    let mut penalty_score = 0; // Unscaled terms (structural worthless penalty)
 
     for (_cx, cy, tile) in game.board.tiles.iter() {
         let occ_pawns = tile.occ_pawns;
@@ -1127,14 +1137,15 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
                 let y = base_y + (idx / 8) as i64;
 
                 if y >= w_promo {
-                    // Worthless if already past promotion
-                    raw_score -= PAWN_PAST_PROMO_PENALTY;
+                    // Worthless if already past promotion - apply unscaled penalty
+                    // to ensure 10x value reduction regardless of phase.
+                    penalty_score -= PAWN_PAST_PROMO_PENALTY;
                 } else {
                     let dist = w_promo - y;
                     if dist > PAWN_FULL_VALUE_THRESHOLD {
-                        raw_score -= PAWN_FAR_FROM_PROMO_PENALTY;
+                        bonus_score -= PAWN_FAR_FROM_PROMO_PENALTY;
                     } else {
-                        raw_score += (PAWN_FULL_VALUE_THRESHOLD - dist) as i32 * 4;
+                        bonus_score += (PAWN_FULL_VALUE_THRESHOLD - dist) as i32 * 4;
                     }
                     // Track most advanced for special bonus
                     if y > white_max_y {
@@ -1154,13 +1165,13 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
                 let y = base_y + (idx / 8) as i64;
 
                 if y <= b_promo {
-                    raw_score += PAWN_PAST_PROMO_PENALTY;
+                    penalty_score += PAWN_PAST_PROMO_PENALTY;
                 } else {
                     let dist = y - b_promo;
                     if dist > PAWN_FULL_VALUE_THRESHOLD {
-                        raw_score += PAWN_FAR_FROM_PROMO_PENALTY;
+                        bonus_score += PAWN_FAR_FROM_PROMO_PENALTY;
                     } else {
-                        raw_score -= (PAWN_FULL_VALUE_THRESHOLD - dist) as i32 * 4;
+                        bonus_score -= (PAWN_FULL_VALUE_THRESHOLD - dist) as i32 * 4;
                     }
                     // Track most advanced
                     if y < black_min_y {
@@ -1181,7 +1192,7 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
     // Apply special high-value promotion bonus for the single most advanced pawn
     if white_has_promo {
         let dist = w_promo - white_max_y;
-        raw_score += if dist <= 1 {
+        bonus_score += if dist <= 1 {
             500
         } else if dist <= 2 {
             350
@@ -1191,7 +1202,7 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
     }
     if black_has_promo {
         let dist = black_min_y - b_promo;
-        raw_score -= if dist <= 1 {
+        bonus_score -= if dist <= 1 {
             500
         } else if dist <= 2 {
             350
@@ -1200,8 +1211,8 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
         };
     }
 
-    // Scale final result by game phase
-    let final_score = raw_score * multiplier_q / 100;
+    // Scale advancement bonuses by game phase, but keep structural penalties unscaled
+    let final_score = (bonus_score * multiplier_q / 100) + penalty_score;
 
     (final_score, white_has_promo, black_has_promo)
 }
