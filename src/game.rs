@@ -682,7 +682,7 @@ impl GameState {
             return false;
         };
 
-        k <= check_dist
+        k >= 1 && k <= check_dist
     }
 
     /// Check if a rook/queen can move from `from` to `to` (orthogonal move).
@@ -1506,15 +1506,8 @@ impl GameState {
             }
 
             // ==========================================
-            // PAWN BLOCKING
-            // Pawns only move 1-2 squares, so pseudo-legal generation handles them fine
-            // They'll be processed in the fallback section below
-            // ==========================================
-
-            // ==========================================
-            // CAPTURE DETECTION (for ALL pieces)
-            // Uses pseudo-legal move generation - handles captures from ANY direction
-            // Also catches blocking for complex pieces (Rose, etc)
+            // CAPTURE & BLOCKING DETECTION (for remaining pieces)
+            // Uses pseudo-legal move generation for captures
             // ==========================================
             let mut pseudo = MoveList::new();
             get_pseudo_legal_moves_for_piece_into(
@@ -1530,30 +1523,27 @@ impl GameState {
                 s.enemy_king_pos(),
             );
 
+            // Check if this piece has optimized blocking (already handled above)
+            let has_optimized_blocking = can_ortho
+                || can_diag
+                || can_knight
+                || can_king
+                || pt == PieceType::Camel
+                || pt == PieceType::Zebra
+                || pt == PieceType::Giraffe
+                || pt == PieceType::Hawk
+                || pt == PieceType::Knightrider;
+
             for m in pseudo {
-                // Capture of checker (from any direction)
+                // Capture of checker
                 if m.to.x == checker_sq.x && m.to.y == checker_sq.y {
                     out.push(m);
                     continue;
                 }
-
-                // For pieces not handled above (Rose, Husky, Obstacle, Void, etc),
-                // check if any move lands on the check ray (blocking)
-                if is_slider {
-                    let handled_blocking = can_ortho
-                        || can_diag
-                        || can_knight
-                        || can_king
-                        || pt == PieceType::Camel
-                        || pt == PieceType::Zebra
-                        || pt == PieceType::Giraffe
-                        || pt == PieceType::Hawk
-                        || pt == PieceType::Knightrider;
-
-                    if !handled_blocking {
-                        if s.is_on_check_ray(&m.to, &king_sq, step_x, step_y, check_dist) {
-                            out.push(m);
-                        }
+                // Blocking moves for pieces without optimized blocking
+                if is_slider && !has_optimized_blocking {
+                    if s.is_on_check_ray(&m.to, &king_sq, step_x, step_y, check_dist) {
+                        out.push(m);
                     }
                 }
             }
