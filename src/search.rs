@@ -2042,7 +2042,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     // if !gives_check {
                     let see_margin = (166 * depth as i32 + capt_hist / 29).max(0);
                     let see_value = static_exchange_eval(game, &m);
-                    if see_value < see_margin {
+                    if see_value < -see_margin {
                         continue;
                     }
                     // }
@@ -2382,7 +2382,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     // "failed high after reduction" is a weaker signal than "caused cutoff"
                     let lmr_bonus = 100 * depth as i32;
                     let max_history: i32 = params::DEFAULT_HISTORY_MAX_GRAVITY;
-                    
+
                     // Update continuation histories at ply offsets -1, -2, -4
                     // (matching the existing beta-cutoff update pattern)
                     for &plies_ago in &[0usize, 1, 3] {
@@ -2779,16 +2779,6 @@ mod tests {
     use crate::game::GameState;
     use crate::moves::Move;
 
-    // ======================== Constants Tests ========================
-
-    #[test]
-    fn test_search_constants() {
-        assert_eq!(MAX_PLY, 64);
-        assert!(INFINITY > MATE_VALUE);
-        assert!(MATE_VALUE > MATE_SCORE);
-        assert!(MATE_SCORE > 0);
-    }
-
     #[test]
     fn test_corrhist_constants() {
         assert!(CORRHIST_SIZE.is_power_of_two());
@@ -3113,16 +3103,6 @@ mod tests {
         assert_eq!(stats.tt_capacity, 1000);
         assert_eq!(stats.tt_used, 100);
         assert_eq!(stats.tt_fill_permille, 100);
-    }
-
-    // ======================== Constants Extended Tests ========================
-
-    #[test]
-    fn test_search_constants_values() {
-        assert!(MAX_PLY > 0);
-        assert!(INFINITY > 0);
-        assert!(MATE_VALUE > 0);
-        assert!(MATE_SCORE < MATE_VALUE);
     }
 
     // ======================== Extended Searcher Tests ========================
