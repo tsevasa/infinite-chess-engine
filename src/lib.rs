@@ -314,6 +314,8 @@ impl Engine {
 
         // Build starting GameState from JS board
         let mut board = Board::new();
+        let mut white_has_royal = false;
+        let mut black_has_royal = false;
         for p in &js_game.board.pieces {
             let x: i64 =
                 p.x.parse()
@@ -328,6 +330,14 @@ impl Engine {
                 .player
                 .parse::<PlayerColor>()
                 .unwrap_or(PlayerColor::White);
+
+            if piece_type.is_royal() {
+                match color {
+                    PlayerColor::White => white_has_royal = true,
+                    PlayerColor::Black => black_has_royal = true,
+                    _ => {}
+                }
+            }
 
             board.set_piece(x, y, Piece::new(piece_type, color));
         }
@@ -377,7 +387,7 @@ impl Engine {
         };
 
         // Parse game rules from JS
-        let game_rules = if let Some(js_rules) = js_game.game_rules {
+        let mut game_rules = if let Some(js_rules) = js_game.game_rules {
             use game::{GameRules, PromotionRanks, WinCondition};
 
             let promotion_ranks = js_rules.promotion_ranks.map(|pr| PromotionRanks {
@@ -426,6 +436,14 @@ impl Engine {
         } else {
             game::GameRules::default()
         };
+
+        // If a side has no royal pieces, their win condition against them MUST be AllPiecesCaptured.
+        if !white_has_royal {
+            game_rules.white_win_condition = game::WinCondition::AllPiecesCaptured;
+        }
+        if !black_has_royal {
+            game_rules.black_win_condition = game::WinCondition::AllPiecesCaptured;
+        }
 
         // Precompute effective promotion ranks and dynamic back ranks once per
         // game from promotion_ranks. For standard chess this yields promo
