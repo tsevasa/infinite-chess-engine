@@ -1523,17 +1523,15 @@ fn generate_castling_moves(
 // }
 
 /// Generate only sliding captures for quiescence search.
-/// Uses step-by-step ray tracing with bitboard occupancy fast-path.
+/// Uses O(log n) SpatialIndices for infinite-range blocker detection.
 fn generate_sliding_capture_moves(
     board: &Board,
     from: &Coordinate,
     piece: &Piece,
     directions: &[(i64, i64)],
-    _indices: &SpatialIndices,
+    indices: &SpatialIndices,
     out: &mut MoveList,
 ) {
-    use crate::tiles::{local_index, tile_coords};
-
     let our_color = piece.color();
 
     for &(dx_raw, dy_raw) in directions {
@@ -1544,46 +1542,15 @@ fn generate_sliding_capture_moves(
                 continue;
             }
 
-            let mut step = 1i64;
-            loop {
-                let x = from.x + dx * step;
-                let y = from.y + dy * step;
+            // O(log n) blocker lookup - handles infinite distance
+            let (closest_dist, closest_is_enemy) =
+                find_blocker_via_indices(board, from, dx, dy, indices, our_color);
 
-                if !in_bounds(x, y) {
-                    break;
-                }
-
-                // BITBOARD FAST PATH: Check tile occupancy for O(1) empty detection
-                let (cx, cy) = tile_coords(x, y);
-                let local_idx = local_index(x, y);
-
-                // Get tile - if no tile exists, square is empty
-                let is_occupied = if let Some(tile) = board.tiles.get_tile(cx, cy) {
-                    (tile.occ_all >> local_idx) & 1 != 0
-                } else {
-                    false
-                };
-
-                if !is_occupied {
-                    step += 1;
-                    if step > 50 {
-                        break;
-                    }
-                    continue;
-                }
-
-                // Square is occupied - get piece details from tile
-                if let Some(tile) = board.tiles.get_tile(cx, cy) {
-                    let packed = tile.piece[local_idx];
-                    if packed != 0 {
-                        let target = Piece::from_packed(packed);
-                        // Obstacles are neutral but capturable - check is_uncapturable()
-                        if target.color() != our_color && !target.piece_type().is_uncapturable() {
-                            out.push(Move::new(*from, Coordinate::new(x, y), *piece));
-                        }
-                    }
-                }
-                break; // Square occupied = ray blocked
+            // Only add capture if blocker is an enemy piece
+            if closest_dist < i64::MAX && closest_is_enemy {
+                let x = from.x + dx * closest_dist;
+                let y = from.y + dy * closest_dist;
+                out.push(Move::new(*from, Coordinate::new(x, y), *piece));
             }
         }
     }

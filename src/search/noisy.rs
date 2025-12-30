@@ -891,27 +891,27 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
                 // Continuation history update (Stockfish indices: 0, 1, 2, 3, 5)
                 for &plies_ago in &[0usize, 1, 2, 3, 5] {
                     if ply > plies_ago
-                        && let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1] {
-                            let prev_piece =
-                                searcher.moved_piece_history[ply - plies_ago - 1] as usize;
-                            if prev_piece < 16 {
-                                let prev_to_hash = hash_coord_32(prev_move.to.x, prev_move.to.y);
+                        && let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1]
+                    {
+                        let prev_piece = searcher.moved_piece_history[ply - plies_ago - 1] as usize;
+                        if prev_piece < 16 {
+                            let prev_to_hash = hash_coord_32(prev_move.to.x, prev_move.to.y);
 
-                                for quiet in &quiets_searched {
-                                    let q_from_hash = hash_coord_32(quiet.from.x, quiet.from.y);
-                                    let q_to_hash = hash_coord_32(quiet.to.x, quiet.to.y);
-                                    let is_best = quiet.from == m.from && quiet.to == m.to;
+                            for quiet in &quiets_searched {
+                                let q_from_hash = hash_coord_32(quiet.from.x, quiet.from.y);
+                                let q_to_hash = hash_coord_32(quiet.to.x, quiet.to.y);
+                                let is_best = quiet.from == m.from && quiet.to == m.to;
 
-                                    let entry = &mut searcher.cont_history[prev_piece]
-                                        [prev_to_hash][q_from_hash][q_to_hash];
-                                    if is_best {
-                                        *entry += adj - *entry * adj / max_history;
-                                    } else {
-                                        *entry += -adj - *entry * adj / max_history;
-                                    }
+                                let entry = &mut searcher.cont_history[prev_piece][prev_to_hash]
+                                    [q_from_hash][q_to_hash];
+                                if is_best {
+                                    *entry += adj - *entry * adj / max_history;
+                                } else {
+                                    *entry += -adj - *entry * adj / max_history;
                                 }
                             }
                         }
+                    }
                 }
             } else if let Some(cap_type) = captured_type {
                 let bonus = (depth * depth) as i32;
