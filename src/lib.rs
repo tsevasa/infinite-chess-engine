@@ -310,6 +310,15 @@ impl Engine {
             let bottom = wb.bottom.parse::<i64>().unwrap_or(-1_000_000_000_000_000);
             let top = wb.top.parse::<i64>().unwrap_or(1_000_000_000_000_000);
             set_world_bounds(left, right, bottom, top);
+        } else {
+            // Always reset to infinite defaults to prevent world borders from
+            // leaking from previous games in the same worker (e.g. SPRT).
+            set_world_bounds(
+                -1_000_000_000_000_000,
+                1_000_000_000_000_000,
+                -1_000_000_000_000_000,
+                1_000_000_000_000_000,
+            );
         }
 
         // Build starting GameState from JS board

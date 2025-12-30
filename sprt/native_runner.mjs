@@ -445,16 +445,8 @@ export class NativeWasmRunner {
 
         const moveLines = [];
         try {
-            const vdata = VARIANTS[variantName];
-            const startPositionStr = (vdata && vdata.position) || getVariantPosition(variantName).position;
-            const startPosition = parseICNPosition(startPositionStr);
-            startPosition.turn = 'w';
-            startPosition.board = { pieces: startPosition.pieces };
-            startPosition.special_rights = startPosition.special_rights;
-
-            const gameRules = (vdata && vdata.game_rules) || {};
-
-            const position = JSON.parse(JSON.stringify(startPosition));
+            const position = getVariantPosition(variantName);
+            const gameRules = position.game_rules || {};
 
             // Time Control Setup
             let whiteTime = 0, blackTime = 0, increment = 0, fixedTime = null;
@@ -508,7 +500,9 @@ export class NativeWasmRunner {
                     time_limit_ms: timeLimit,
                     game_rules: gameRules,
                     search_params: searchParams,
-                    fullmove_number: position.fullmove_number || 1
+                    fullmove_number: position.fullmove_number || 1,
+                    variant: position.variant,
+                    world_bounds: position.world_bounds
                 };
 
                 const t0 = Date.now();
