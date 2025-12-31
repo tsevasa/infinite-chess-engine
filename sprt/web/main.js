@@ -28,8 +28,8 @@ const sprtOutput = document.getElementById('sprtOutput');
 const gameLogEl = document.getElementById('gameLog');
 const copyLogBtn = document.getElementById('copyLog');
 const downloadLogsBtn = document.getElementById('downloadLogs');
-const downloadGamesBtn = document.getElementById('downloadGames');
-const downloadGamesJsonBtn = document.getElementById('downloadGamesJson');
+const downloadGamesTxtBtn = document.getElementById('downloadGames-txt');
+const downloadGamesJsonBtn = document.getElementById('downloadGames-json');
 const icnOutputEl = document.getElementById('icnOutput');
 const icnTextEl = document.getElementById('icnText');
 const sprtStatusEl = document.getElementById('sprtStatus');
@@ -1087,8 +1087,8 @@ async function runSprt() {
     stopSprtBtn.disabled = true;
     // Show/enable download games if we have any ICN logs
     const hasGames = gameLogs.length > 0;
-    downloadGamesBtn.disabled = !hasGames;
-    downloadGamesBtn.style.display = hasGames ? '' : 'none';
+    downloadGamesTxtBtn.disabled = !hasGames;
+    downloadGamesTxtBtn.style.display = hasGames ? '' : 'none';
     downloadGamesJsonBtn.disabled = !hasGames;
     downloadGamesJsonBtn.style.display = hasGames ? '' : 'none';
 }
@@ -1138,8 +1138,8 @@ function stopSprt() {
     }
     // Allow downloads of games if any finished before abort
     const hasGamesAbort = gameLogs.length > 0;
-    downloadGamesBtn.disabled = !hasGamesAbort;
-    downloadGamesBtn.style.display = hasGamesAbort ? '' : 'none';
+    downloadGamesTxtBtn.disabled = !hasGamesAbort;
+    downloadGamesTxtBtn.style.display = hasGamesAbort ? '' : 'none';
     downloadGamesJsonBtn.disabled = !hasGamesAbort;
     downloadGamesJsonBtn.style.display = hasGamesAbort ? '' : 'none';
 }
@@ -1218,7 +1218,7 @@ runSprtBtn.addEventListener('click', runSprt);
 stopSprtBtn.addEventListener('click', stopSprt);
 copyLogBtn.addEventListener('click', copyLog);
 downloadLogsBtn.addEventListener('click', downloadLogs);
-downloadGamesBtn.addEventListener('click', downloadGames);
+downloadGamesTxtBtn.addEventListener('click', downloadGames);
 downloadGamesJsonBtn.addEventListener('click', downloadGamesJson);
 sprtVariantsEl.addEventListener('change', updateSelectedVariants);
 
@@ -1296,8 +1296,8 @@ window.__sprt_compute_features = async (rawSamples) => {
 
 initWasm();
 // Initially hide & disable games download until we have results
-downloadGamesBtn.disabled = true;
-downloadGamesBtn.style.display = 'none';
+downloadGamesTxtBtn.disabled = true;
+downloadGamesTxtBtn.style.display = 'none';
 downloadGamesJsonBtn.disabled = true;
 downloadGamesJsonBtn.style.display = 'none';
 
