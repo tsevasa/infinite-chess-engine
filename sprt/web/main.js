@@ -850,6 +850,10 @@ async function runSprt() {
     let llr = 0;
     gameLogs = [];
 
+    // Disable download buttons as logs are cleared
+    downloadGamesTxtBtn.disabled = true;
+    downloadGamesJsonBtn.disabled = true;
+
     sprtOutput.innerHTML = '';
     perVariantStats = {};
     clearLog();
@@ -925,6 +929,11 @@ async function runSprt() {
                             msg.variantName, // Add variant to ICN log
                         );
                         gameLogs.push(icnLog);
+                        // Enable download buttons immediately upon first result
+                        if (gameLogs.length > 0) {
+                            downloadGamesTxtBtn.disabled = false;
+                            downloadGamesJsonBtn.disabled = false;
+                        }
                         // Global results
                         if (result === 'win') wins++;
                         else if (result === 'loss') losses++;
@@ -1085,12 +1094,6 @@ async function runSprt() {
     sprtRunning = false;
     runSprtBtn.disabled = false;
     stopSprtBtn.disabled = true;
-    // Show/enable download games if we have any ICN logs
-    const hasGames = gameLogs.length > 0;
-    downloadGamesTxtBtn.disabled = !hasGames;
-    downloadGamesTxtBtn.style.display = hasGames ? '' : 'none';
-    downloadGamesJsonBtn.disabled = !hasGames;
-    downloadGamesJsonBtn.style.display = hasGames ? '' : 'none';
 }
 
 function stopSprt() {
@@ -1136,12 +1139,10 @@ function stopSprt() {
             sprtLog('  Elo Difference: ' + (lastElo >= 0 ? '+' : '') + lastElo.toFixed(1) + ' ±' + lastEloError.toFixed(1));
         }
     }
-    // Allow downloads of games if any finished before abort
+    // Allow download of any completed games
     const hasGamesAbort = gameLogs.length > 0;
     downloadGamesTxtBtn.disabled = !hasGamesAbort;
-    downloadGamesTxtBtn.style.display = hasGamesAbort ? '' : 'none';
     downloadGamesJsonBtn.disabled = !hasGamesAbort;
-    downloadGamesJsonBtn.style.display = hasGamesAbort ? '' : 'none';
 }
 
 function copyLog() {
@@ -1295,11 +1296,6 @@ window.__sprt_compute_features = async (rawSamples) => {
 };
 
 initWasm();
-// Initially hide & disable games download until we have results
-downloadGamesTxtBtn.disabled = true;
-downloadGamesTxtBtn.style.display = 'none';
-downloadGamesJsonBtn.disabled = true;
-downloadGamesJsonBtn.style.display = 'none';
 
 /* UI Logic for TC Mode */
 if (typeof sprtTcMode !== 'undefined' && sprtTcMode) {
