@@ -142,7 +142,7 @@ The UI provides download buttons:
 | **Copy Log** | Copy game log to clipboard |
 | **Download Logs** | Save game logs in ICN format |
 | **Download Games (TXT)** | Save games as a `.txt` |
-| **Download Games (TXT)** | Save games as a `.json` |
+| **Download Games (JSON)** | Save games as a `.json` |
 
 ICN format includes headers like:
 ```

@@ -930,10 +930,8 @@ async function runSprt() {
                         );
                         gameLogs.push(icnLog);
                         // Enable download buttons immediately upon first result
-                        if (gameLogs.length > 0) {
-                            downloadGamesTxtBtn.disabled = false;
-                            downloadGamesJsonBtn.disabled = false;
-                        }
+                        downloadGamesTxtBtn.disabled = false;
+                        downloadGamesJsonBtn.disabled = false;
                         // Global results
                         if (result === 'win') wins++;
                         else if (result === 'loss') losses++;
