@@ -1934,12 +1934,10 @@ fn compute_pawn_structure(game: &GameState) -> i32 {
             score += 20;
         }
 
-        /*
         // Connected pawn bonus: check if there's a friendly pawn diagonally behind
         if is_connected_pawn(game, *wx, *wy, PlayerColor::White) {
             score += CONNECTED_PAWN_BONUS;
         }
-        */
     }
 
     // --- BLACK PAWNS ---
@@ -1968,12 +1966,10 @@ fn compute_pawn_structure(game: &GameState) -> i32 {
             score -= 20;
         }
 
-        /*
         // Connected pawn bonus: check if there's a friendly pawn diagonally behind
         if is_connected_pawn(game, *bx, *by, PlayerColor::Black) {
             score -= CONNECTED_PAWN_BONUS;
         }
-        */
     }
 
     score
