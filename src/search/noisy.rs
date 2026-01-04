@@ -533,9 +533,11 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
         tt_move = best;
         tt_value = Some(score);
         // Stockfish's "graph history interaction" workaround:
+        // Don't cutoff on mate scores (they need full verification at each depth)
         let rule_limit = searcher.move_rule_limit as u32;
         if !is_pv
             && score != super::INFINITY + 1
+            && score.abs() < super::MATE_SCORE
             && game.halfmove_clock < rule_limit.saturating_sub(4)
             && game.repetition == 0
         {
@@ -1029,8 +1031,18 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
 
     std::mem::swap(&mut searcher.move_buffers[ply], &mut moves);
 
-    if best_move.is_none() {
-        return 0;
+    // Checkmate, stalemate, or loss by capture-based variants
+    if legal_moves == 0 {
+        // Determine if this is a loss:
+        // 1. In check AND must escape check (our win condition is checkmate) → checkmate
+        // 2. No pieces left (relevant for allpiecescaptured variants) → loss
+        let checkmate = in_check && game.must_escape_check();
+        let no_pieces = !game.has_pieces(game.turn);
+        if checkmate || no_pieces {
+            return -MATE_VALUE + ply as i32;
+        } else {
+            return 0; // Stalemate
+        }
     }
 
     let flag = if best_score <= alpha_orig {

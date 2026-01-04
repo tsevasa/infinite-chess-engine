@@ -761,8 +761,8 @@ impl Engine {
             amp.max(0)
         } else {
             match strength {
-                1 => 200,
-                2 => 100,
+                1 => 800,
+                2 => 400,
                 _ => 0, // strength 3 = no noise
             }
         };
