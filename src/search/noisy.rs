@@ -513,9 +513,9 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
         0
     };
 
-    // Transposition table probe
     let hash = TranspositionTable::generate_hash(game);
     let mut tt_move: Option<Move> = None;
+    let mut tt_value: Option<i32> = None;
 
     let rule50_count = game.halfmove_clock;
     if let Some((score, best)) = super::probe_tt_with_shared(
@@ -531,6 +531,7 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
         },
     ) {
         tt_move = best;
+        tt_value = Some(score);
         // Stockfish's "graph history interaction" workaround:
         let rule_limit = searcher.move_rule_limit as u32;
         if !is_pv
@@ -643,6 +644,85 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
         // Internal iterative reductions
         if !all_node && depth >= 6 && tt_move.is_none() && prior_reduction <= 3 {
             depth -= 1;
+        }
+    }
+    // =========================================================================
+    // ProbCut Pruning
+    // =========================================================================
+    let prob_cut_beta = beta + 235 - if improving { 63 } else { 0 };
+    if !is_pv
+        && !in_check
+        && depth >= 5
+        && beta.abs() < super::MATE_SCORE
+        && !tt_value.is_some_and(|v| v < prob_cut_beta)
+    {
+        let mut prob_cut_depth = (depth as i32 - 4 - (static_eval - beta) / 315).max(0) as usize;
+        if prob_cut_depth > depth {
+            prob_cut_depth = depth;
+        }
+
+        let mut captures: MoveList = MoveList::new();
+        let ctx = crate::moves::MoveGenContext {
+            special_rights: &game.special_rights,
+            en_passant: &game.en_passant,
+            game_rules: &game.game_rules,
+            indices: &game.spatial_indices,
+            enemy_king_pos: game.enemy_king_pos(),
+        };
+        crate::moves::get_quiescence_captures(&game.board, game.turn, &ctx, &mut captures);
+        super::sort_captures(game, &mut captures);
+
+        for m in &captures {
+            if super::static_exchange_eval(game, m) < prob_cut_beta - static_eval {
+                continue;
+            }
+
+            let undo = game.make_move(m);
+            if game.is_move_illegal() {
+                game.undo_move(m, undo);
+                continue;
+            }
+
+            let mut val = -quiescence_noisy(
+                searcher,
+                game,
+                ply + 1,
+                -prob_cut_beta,
+                -prob_cut_beta + 1,
+                noise_amp,
+            );
+
+            if val >= prob_cut_beta {
+                val = -negamax_noisy(&mut NegamaxNoisyContext {
+                    searcher,
+                    game,
+                    depth: prob_cut_depth,
+                    ply: ply + 1,
+                    alpha: -prob_cut_beta,
+                    beta: -prob_cut_beta + 1,
+                    allow_null: true,
+                    noise_amp,
+                });
+            }
+
+            game.undo_move(m, undo);
+
+            if searcher.hot.stopped {
+                return 0;
+            }
+
+            if val >= prob_cut_beta {
+                searcher.tt.store(&crate::search::tt::TTStoreParams {
+                    hash,
+                    depth: prob_cut_depth + 1,
+                    flag: crate::search::tt::TTFlag::LowerBound,
+                    score: val,
+                    best_move: Some(*m),
+                    ply,
+                });
+
+                return val;
+            }
         }
     }
 

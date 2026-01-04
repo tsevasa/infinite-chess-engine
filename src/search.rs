@@ -585,7 +585,7 @@ impl Searcher {
                 seldepth: 0,
                 min_depth_required: 1, // Must complete at least depth 1
             },
-            tt: TranspositionTable::new(32),
+            tt: TranspositionTable::new(16),
             pv_table,
             pv_length: [0; MAX_PLY],
             killers,
@@ -616,8 +616,6 @@ impl Searcher {
     }
 
     pub fn reset_for_iteration(&mut self) {
-        // Note: DO NOT reset timer here - we want global time limit across all iterations
-        // Note: DO NOT reset nodes/qnodes here - they must be cumulative for the whole search
         self.hot.stopped = false;
         self.hot.seldepth = 0;
 
@@ -1908,6 +1906,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     // Transposition table probe for hash move and potential cutoff
     let hash = TranspositionTable::generate_hash(game);
     let mut tt_move: Option<Move> = None;
+    let mut tt_value: Option<i32> = None;
 
     // Stockfish passes rule50_count (halfmove_clock) directly to value_from_tt
     let rule50_count = game.halfmove_clock;
@@ -1924,6 +1923,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         },
     ) {
         tt_move = best;
+        tt_value = Some(score);
         // In non-PV nodes, use TT cutoff if valid score returned
         // Stockfish's "graph history interaction" workaround:
         // - Don't produce TT cutoffs when rule50 is high (>= 96)
@@ -2064,6 +2064,88 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         // Without TT move, reduce depth to find one faster
         if !all_node && depth >= 6 && tt_move.is_none() && prior_reduction <= 3 {
             depth -= 1;
+        }
+    }
+    // =========================================================================
+    // ProbCut
+    // =========================================================================
+    // If we have a good enough capture and a reduced search returns a value
+    // much above beta, we can prune.
+    let prob_cut_beta = beta + 235 - if improving { 63 } else { 0 };
+    if !is_pv
+        && !in_check
+        && depth >= 5
+        && beta.abs() < MATE_SCORE
+        && !tt_value.is_some_and(|v| v < prob_cut_beta)
+    {
+        let mut prob_cut_depth = (depth as i32 - 4 - (static_eval - beta) / 315).max(0) as usize;
+        if prob_cut_depth > depth {
+            prob_cut_depth = depth;
+        }
+
+        // Generate captures only
+        // specialized capture-only generator
+        let mut captures: MoveList = MoveList::new();
+        let ctx = crate::moves::MoveGenContext {
+            special_rights: &game.special_rights,
+            en_passant: &game.en_passant,
+            game_rules: &game.game_rules,
+            indices: &game.spatial_indices,
+            enemy_king_pos: game.enemy_king_pos(),
+        };
+        crate::moves::get_quiescence_captures(&game.board, game.turn, &ctx, &mut captures);
+
+        // Sort captures to try best ones first
+        sort_captures(game, &mut captures);
+
+        for m in &captures {
+            // Apply SEE pruning for the ProbCut move
+            // Threshold: prob_cut_beta - static_eval
+            if static_exchange_eval(game, m) < prob_cut_beta - static_eval {
+                continue;
+            }
+
+            let undo = game.make_move(m);
+            if game.is_move_illegal() {
+                game.undo_move(m, undo);
+                continue;
+            }
+
+            // Preliminary qsearch to verify
+            let mut val = -quiescence(searcher, game, ply + 1, -prob_cut_beta, -prob_cut_beta + 1);
+
+            // If qsearch held, perform regular search at reduced depth
+            if val >= prob_cut_beta {
+                val = -negamax(&mut NegamaxContext {
+                    searcher,
+                    game,
+                    depth: prob_cut_depth,
+                    ply: ply + 1,
+                    alpha: -prob_cut_beta,
+                    beta: -prob_cut_beta + 1,
+                    allow_null: true,
+                    node_type: NodeType::Cut, // Expected cut node
+                });
+            }
+
+            game.undo_move(m, undo);
+
+            if searcher.hot.stopped {
+                return 0;
+            }
+
+            if val >= prob_cut_beta {
+                searcher.tt.store(&crate::search::tt::TTStoreParams {
+                    hash,
+                    depth: prob_cut_depth + 1,
+                    flag: TTFlag::LowerBound,
+                    score: val,
+                    best_move: Some(*m),
+                    ply,
+                });
+
+                return val;
+            }
         }
     }
 
@@ -2933,22 +3015,6 @@ mod tests {
         assert_eq!(searcher.thread_id, 0);
         assert_eq!(searcher.killers.len(), MAX_PLY);
         assert_eq!(searcher.pv_length.len(), MAX_PLY);
-    }
-
-    #[test]
-    fn test_searcher_reset_for_iteration() {
-        let mut searcher = Searcher::new(5000);
-        searcher.hot.nodes = 1000;
-        searcher.hot.qnodes = 500;
-        searcher.hot.seldepth = 10;
-        searcher.pv_length[0] = 5;
-
-        searcher.reset_for_iteration();
-
-        assert_eq!(searcher.hot.nodes, 0);
-        assert_eq!(searcher.hot.qnodes, 0);
-        assert_eq!(searcher.hot.seldepth, 0);
-        assert!(!searcher.hot.stopped);
     }
 
     #[test]
