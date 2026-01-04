@@ -617,8 +617,7 @@ impl Searcher {
 
     pub fn reset_for_iteration(&mut self) {
         // Note: DO NOT reset timer here - we want global time limit across all iterations
-        self.hot.nodes = 0;
-        self.hot.qnodes = 0;
+        // Note: DO NOT reset nodes/qnodes here - they must be cumulative for the whole search
         self.hot.stopped = false;
         self.hot.seldepth = 0;
 
@@ -654,12 +653,39 @@ impl Searcher {
         }
     }
 
-    /// Increments TT generation for age-based replacement.
-    /// Does NOT clear histories - they persist across searches.
+    /// Start a new search: reset per-search state and increment TT age (or clear if requested).
     pub fn new_search(&mut self) {
         // Temporarily disable persistent TT: clear it instead of incrementing age
         self.tt.clear();
         // self.tt.increment_age();
+
+        // Reset cumulative counters
+        self.hot.nodes = 0;
+        self.hot.qnodes = 0;
+        self.hot.seldepth = 0;
+        self.hot.stopped = false;
+
+        // Reset search control
+        self.hot.min_depth_required = 1;
+
+        // Reset iterative deepening state
+        self.prev_score = 0;
+        self.best_move_root = None;
+
+        // Reset killers - they are position-dependent and should be fresh for a new search
+        for k in self.killers.iter_mut() {
+            k[0] = None;
+            k[1] = None;
+        }
+
+        // Reset TT move history - hits on the old TT are no longer relevant
+        self.tt_move_history = 0;
+
+        // Stockfish: Fill lowPlyHistory with 97 at the start of iterative deepening
+        // (not 0, to give a small positive bias to moves that haven't been seen)
+        for row in self.low_ply_history.iter_mut() {
+            row.fill(97);
+        }
     }
 
     /// Clears TT and resets all history tables to neutral values.
@@ -1218,22 +1244,14 @@ pub fn get_best_move_threaded(
         // Get or create the persistent searcher
         let searcher = opt.get_or_insert_with(|| Searcher::new(time_limit_ms));
 
-        // Increment TT generation for age-based replacement (like Stockfish's tt.new_search())
+        // Initialize searcher for this search
         searcher.new_search();
 
         // Update search parameters for this search
         searcher.hot.time_limit_ms = time_limit_ms;
         searcher.silent = silent;
         searcher.thread_id = thread_id;
-        searcher.hot.stopped = false;
         searcher.hot.timer.reset();
-        searcher.hot.min_depth_required = 1;
-
-        // Stockfish: Fill lowPlyHistory with 97 at the start of iterative deepening
-        // (not 0, to give a small positive bias to moves that haven't been seen)
-        for row in searcher.low_ply_history.iter_mut() {
-            row.fill(97);
-        }
 
         // Set correction mode based on variant (zero overhead during search)
         searcher.set_corrhist_mode(game);
@@ -1269,20 +1287,13 @@ pub fn get_best_moves_multipv(
         // Get or create the persistent searcher
         let searcher = opt.get_or_insert_with(|| Searcher::new(time_limit_ms));
 
-        // Increment TT generation for age-based replacement (like Stockfish's tt.new_search())
+        // Initialize searcher for this search
         searcher.new_search();
 
         // Update search parameters for this search
         searcher.hot.time_limit_ms = time_limit_ms;
         searcher.silent = silent;
-        searcher.hot.stopped = false;
         searcher.hot.timer.reset();
-        searcher.hot.min_depth_required = 1;
-
-        // Stockfish: Fill lowPlyHistory with 97 at the start of iterative deepening
-        for row in searcher.low_ply_history.iter_mut() {
-            row.fill(97);
-        }
 
         searcher.set_corrhist_mode(game);
         searcher.move_rule_limit = game

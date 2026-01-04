@@ -75,20 +75,13 @@ pub fn get_best_move_with_noise(
         // Get or create the persistent searcher
         let searcher = opt.get_or_insert_with(|| super::Searcher::new(time_limit_ms));
 
-        // Increment TT generation for age-based replacement (like Stockfish's tt.new_search())
+        // Initialize searcher for this search
         searcher.new_search();
 
         // Update search parameters for this search
         searcher.hot.time_limit_ms = time_limit_ms;
         searcher.silent = silent;
-        searcher.hot.stopped = false;
         searcher.hot.timer.reset();
-        searcher.hot.min_depth_required = 1;
-
-        // Stockfish: Fill lowPlyHistory with 97 at the start of iterative deepening
-        for row in searcher.low_ply_history.iter_mut() {
-            row.fill(97);
-        }
 
         searcher.set_corrhist_mode(game);
         searcher.move_rule_limit = game
@@ -138,7 +131,7 @@ fn search_with_searcher_noisy(
 
     for depth in 1..=max_depth {
         searcher.reset_for_iteration();
-        
+
         // Time check at iteration start - but note that check_time won't stop
         // during depth 1 due to min_depth_required
         if searcher.hot.min_depth_required == 0
