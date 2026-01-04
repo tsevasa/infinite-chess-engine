@@ -4,7 +4,7 @@ use crate::moves::{
     Move, MoveList, SpatialIndices, get_legal_moves, get_legal_moves_into,
     get_pseudo_legal_moves_for_piece_into, is_square_attacked,
 };
-use crate::utils::is_prime_i64;
+use crate::utils::{is_prime_fast, is_prime_i64};
 use arrayvec::ArrayVec;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
@@ -773,7 +773,7 @@ impl GameState {
         if checker_type == PieceType::Huygen {
             // A piece blocks a Huygen only if it lands on a prime distance from it
             let dist_from_checker = check_dist - k;
-            crate::utils::is_prime_i64(dist_from_checker)
+            crate::utils::is_prime_fast(dist_from_checker)
         } else {
             true
         }
@@ -1530,6 +1530,23 @@ impl GameState {
                             continue;
                         }
 
+                        // Check if square is occupied by friendly piece (cannot block there)
+                        let bx = if is_horizontal {
+                            block_coord
+                        } else {
+                            checker_sq.x
+                        };
+                        let by = if is_horizontal {
+                            checker_sq.y
+                        } else {
+                            block_coord
+                        };
+                        if let Some(p) = self.board.get_piece(bx, by) {
+                            if p.color() == our_color {
+                                continue;
+                            }
+                        }
+
                         let dist_from_huygen = (block_coord - our_huygen_coord).abs();
                         if dist_from_huygen == 0 {
                             continue;
@@ -1562,11 +1579,7 @@ impl GameState {
                             }
                         }
 
-                        let to_sq = if is_horizontal {
-                            Coordinate::new(block_coord, checker_sq.y)
-                        } else {
-                            Coordinate::new(checker_sq.x, block_coord)
-                        };
+                        let to_sq = Coordinate::new(bx, by);
                         out.push(Move::new(from_sq, to_sq, piece));
                     }
                 }
@@ -1653,7 +1666,7 @@ impl GameState {
                         if between {
                             // Check if distance from checker is prime
                             let dist_from_checker = (checker_sq.x - tx).abs();
-                            if is_prime_i64(dist_from_checker) {
+                            if is_prime_fast(dist_from_checker) {
                                 // Check path is clear (vertical move)
                                 if s.is_path_clear_for_rook(&from, &Coordinate::new(tx, ty)) {
                                     out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
@@ -1679,7 +1692,7 @@ impl GameState {
 
                         if between {
                             let dist_from_checker = (checker_sq.y - ty).abs();
-                            if is_prime_i64(dist_from_checker) {
+                            if is_prime_fast(dist_from_checker) {
                                 if s.is_path_clear_for_rook(&from, &Coordinate::new(tx, ty)) {
                                     out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
                                 }
@@ -1719,6 +1732,137 @@ impl GameState {
                 }
             }
 
+            // ==========================================
+            // OPTIMIZED HUYGEN BLOCKING & CAPTURE
+            // Uses intersection logic for O(1) checks on cross-rays.
+            // Falls back to O(N) loop only for parallel rays.
+            // Pre-fetches spatial indices for max performance.
+            // ==========================================
+            if pt == PieceType::Huygen && is_slider {
+                use crate::utils::is_prime_fast;
+                // Pre-fetch spatial indices
+                let row_pieces = s.spatial_indices.rows.get(&from.y);
+                let col_pieces = s.spatial_indices.cols.get(&from.x);
+
+                // --- Helper: Check and push move to (tx, ty) ---
+                // Returns true if move was valid and pushed
+                let mut try_add_move = |tx: i64, ty: i64, verify_checker_dist: bool| {
+                    let d_x = tx - from.x;
+                    let d_y = ty - from.y;
+                    let dist = d_x.abs().max(d_y.abs());
+
+                    // Prime distance check (Huygen constraint)
+                    if dist == 0 || !is_prime_fast(dist) {
+                        return false;
+                    }
+
+                    // For Huygen checker: blocking sq must be prime dist from checker
+                    if verify_checker_dist {
+                        let d_cx = tx - checker_sq.x;
+                        let d_cy = ty - checker_sq.y;
+                        let dist_c = d_cx.abs().max(d_cy.abs());
+                        if !is_prime_fast(dist_c) {
+                            return false;
+                        }
+                    }
+
+                    // Check blockers
+                    let mut blocked = false;
+                    if d_y == 0 {
+                        // Horizontal move
+                        if let Some(vec) = row_pieces {
+                            let dir = d_x.signum();
+                            for &(coord, _) in vec {
+                                let dp = (coord - from.x) * dir;
+                                if dp > 0 && dp < dist && is_prime_fast(dp) {
+                                    blocked = true;
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        // Vertical move
+                        if let Some(vec) = col_pieces {
+                            let dir = d_y.signum();
+                            for &(coord, _) in vec {
+                                let dp = (coord - from.y) * dir;
+                                if dp > 0 && dp < dist && is_prime_fast(dp) {
+                                    blocked = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if !blocked {
+                        out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
+                        return true;
+                    }
+                    false
+                };
+
+                // 1. CAPTURE CHECKER
+                // Check if checker is strictly orthogonal to us
+                let dx_c = checker_sq.x - from.x;
+                let dy_c = checker_sq.y - from.y;
+                if (dx_c == 0) != (dy_c == 0) {
+                    try_add_move(checker_sq.x, checker_sq.y, false);
+                }
+
+                // 2. BLOCKING
+                let max_k = check_dist.min(100);
+
+                // A. Check Horizontal Intercepts (Huygen moves Vertically | to block)
+                // We want intersection where bx == from.x
+                if step_x != 0 {
+                    // Check Ray is not vertical, so it crosses x = from.x exactly once
+                    let k = (from.x - king_sq.x) / step_x;
+                    if k >= 1 && k < check_dist && (from.x - king_sq.x) % step_x == 0 {
+                        let by = king_sq.y + k * step_y;
+                        if by != from.y && can_block_at(from.x, by) {
+                            try_add_move(from.x, by, is_huygen_checker);
+                        }
+                    }
+                } else {
+                    // Check Ray is Vertical (step_x == 0).
+                    // If from.x == king.x, we are PARALLEL (Huygen on the check line).
+                    if from.x == king_sq.x {
+                        for k in 1..max_k {
+                            let by = king_sq.y + k * step_y;
+                            // For parallel vertical, we only care about vertical moves along the ray
+                            if by != from.y && can_block_at(from.x, by) {
+                                try_add_move(from.x, by, is_huygen_checker);
+                            }
+                        }
+                    }
+                }
+
+                // B. Check Vertical Intercepts (Huygen moves Horizontally - to block)
+                // We want intersection where by == from.y
+                if step_y != 0 {
+                    // Check Ray is not horizontal, so it crosses y = from.y exactly once
+                    let k = (from.y - king_sq.y) / step_y;
+                    if k >= 1 && k < check_dist && (from.y - king_sq.y) % step_y == 0 {
+                        let bx = king_sq.x + k * step_x;
+                        if bx != from.x && can_block_at(bx, from.y) {
+                            try_add_move(bx, from.y, is_huygen_checker);
+                        }
+                    }
+                } else {
+                    // Check Ray is Horizontal (step_y == 0).
+                    // If from.y == king.y, we are PARALLEL (Huygen on the check line).
+                    if from.y == king_sq.y {
+                        for k in 1..max_k {
+                            let bx = king_sq.x + k * step_x;
+                            // For parallel horizontal, we only care about horizontal moves along the ray
+                            if bx != from.x && can_block_at(bx, from.y) {
+                                try_add_move(bx, from.y, is_huygen_checker);
+                            }
+                        }
+                    }
+                }
+            }
+
             if is_slider && can_diag {
                 // Diagonal x-y=c intersects check ray
                 let s_diff = step_x - step_y;
@@ -1731,7 +1875,7 @@ impl GameState {
                         let ty = king_sq.y + k * step_y;
                         if !(tx == from.x && ty == from.y)
                             && s.is_path_clear_for_bishop(&from, &Coordinate::new(tx, ty))
-                            && (!is_huygen_checker || is_prime_i64(check_dist - k))
+                            && (!is_huygen_checker || is_prime_fast(check_dist - k))
                         {
                             out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
                         }
@@ -1748,7 +1892,7 @@ impl GameState {
                         let ty = king_sq.y + k * step_y;
                         if !(tx == from.x && ty == from.y)
                             && s.is_path_clear_for_bishop(&from, &Coordinate::new(tx, ty))
-                            && (!is_huygen_checker || is_prime_i64(check_dist - k))
+                            && (!is_huygen_checker || is_prime_fast(check_dist - k))
                         {
                             out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
                         }
@@ -1790,7 +1934,7 @@ impl GameState {
                                 }
                                 if path_clear
                                     && can_block_at(tx, ty)
-                                    && (!is_huygen_checker || is_prime_i64(check_dist - k))
+                                    && (!is_huygen_checker || is_prime_fast(check_dist - k))
                                 {
                                     out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
                                 }
@@ -1916,7 +2060,7 @@ impl GameState {
                     let dist = dx.abs().max(dy.abs());
 
                     // Must be at prime distance
-                    if is_prime_i64(dist) {
+                    if is_prime_fast(dist) {
                         // Check for blockers at closer prime distances
                         let is_horizontal = dy == 0;
                         let line_vec = if is_horizontal {
@@ -1937,7 +2081,7 @@ impl GameState {
                         if let Some(vec) = line_vec {
                             for &(coord, _) in vec {
                                 let d = (coord - our_coord) * dir;
-                                if d > 0 && d < dist && is_prime_i64(d) {
+                                if d > 0 && d < dist && is_prime_fast(d) {
                                     blocked = true;
                                     break;
                                 }
@@ -2032,109 +2176,6 @@ impl GameState {
         } else {
             for (&(ax, ay), p) in self.board.iter() {
                 process_piece(self, Coordinate::new(ax, ay), p, out);
-            }
-        }
-
-        // SLOW FALLBACK: Only if no moves found
-        // Handles cases where Huygen needs to jump over the checker or block at larger distances.
-        if out.is_empty() && is_huygen_checker {
-            use crate::utils::PRIMES_UNDER_128;
-
-            let is_horizontal = dy_check == 0;
-            let checker_coord = if is_horizontal {
-                checker_sq.x
-            } else {
-                checker_sq.y
-            };
-            let king_coord = if is_horizontal { king_sq.x } else { king_sq.y };
-            let dir_from_checker_to_king = (king_coord - checker_coord).signum();
-
-            let line_vec = if is_horizontal {
-                self.spatial_indices.rows.get(&checker_sq.y)
-            } else {
-                self.spatial_indices.cols.get(&checker_sq.x)
-            };
-
-            if let Some(vec) = line_vec {
-                for &(our_huygen_coord, packed) in vec {
-                    let piece = Piece::from_packed(packed);
-                    if piece.color() != our_color || piece.piece_type() != PieceType::Huygen {
-                        continue;
-                    }
-
-                    // Iterate blocking squares (prime distance P from Checker toward King)
-                    'outer_huygen_fallback: for &p in &PRIMES_UNDER_128 {
-                        let block_coord = checker_coord + dir_from_checker_to_king * p;
-
-                        // Must be between king and checker
-                        let block_between = if checker_coord > king_coord {
-                            block_coord > king_coord && block_coord < checker_coord
-                        } else {
-                            block_coord < king_coord && block_coord > checker_coord
-                        };
-
-                        if !block_between {
-                            let past_king = if checker_coord > king_coord {
-                                block_coord <= king_coord
-                            } else {
-                                block_coord >= king_coord
-                            };
-                            if past_king {
-                                break;
-                            }
-                            continue;
-                        }
-
-                        // Check if our Huygen can reach this square
-                        let dist_from_huygen = (block_coord - our_huygen_coord).abs();
-                        if dist_from_huygen == 0 {
-                            continue;
-                        }
-
-                        // Distance must be prime (Miller-Rabin for large distances)
-                        if !is_prime_i64(dist_from_huygen) {
-                            continue;
-                        }
-
-                        // Check for blockers: any piece at prime distance from our Huygen
-                        // that is BETWEEN our Huygen and the blocking square.
-                        // CRITICAL Fallback Rule: Checker piece DOES NOT block us (jump over).
-                        let dir_to_block = (block_coord - our_huygen_coord).signum();
-                        for &(other_coord, _) in vec {
-                            if other_coord == our_huygen_coord || other_coord == checker_coord {
-                                continue;
-                            }
-
-                            let other_dir = (other_coord - our_huygen_coord).signum();
-                            if other_dir != dir_to_block {
-                                continue;
-                            }
-
-                            let other_dist = (other_coord - our_huygen_coord).abs();
-                            if other_dist >= dist_from_huygen {
-                                continue;
-                            }
-
-                            // If this piece is at a prime distance from our Huygen, it blocks.
-                            if is_prime_i64(other_dist) {
-                                continue 'outer_huygen_fallback;
-                            }
-                        }
-
-                        // Legal block found!
-                        let from_sq = if is_horizontal {
-                            Coordinate::new(our_huygen_coord, checker_sq.y)
-                        } else {
-                            Coordinate::new(checker_sq.x, our_huygen_coord)
-                        };
-                        let to_sq = if is_horizontal {
-                            Coordinate::new(block_coord, checker_sq.y)
-                        } else {
-                            Coordinate::new(checker_sq.x, block_coord)
-                        };
-                        out.push(Move::new(from_sq, to_sq, piece));
-                    }
-                }
             }
         }
     }

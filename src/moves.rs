@@ -294,7 +294,7 @@ pub fn is_piece_attacking_square(
         let dist = dx.abs().max(dy.abs());
 
         // Must be at prime distance
-        if !is_prime_i64(dist) {
+        if !is_prime_fast(dist) {
             return false;
         }
 
@@ -319,7 +319,7 @@ pub fn is_piece_attacking_square(
                 }
 
                 // If this piece is at a prime distance from the Huygen, it blocks
-                if is_prime_i64(d) {
+                if is_prime_fast(d) {
                     return false;
                 }
             }
