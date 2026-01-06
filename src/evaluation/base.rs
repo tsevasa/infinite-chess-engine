@@ -114,6 +114,23 @@ pub fn get_piece_value(piece_type: PieceType) -> i32 {
     }
 }
 
+pub fn get_centrality_weight(piece_type: PieceType) -> i64 {
+    match piece_type {
+        PieceType::King => 2000,
+        PieceType::Queen | PieceType::RoyalQueen | PieceType::Amazon => 1000,
+        PieceType::Rook | PieceType::Chancellor => 500,
+        PieceType::Bishop | PieceType::Archbishop => 300,
+        PieceType::Knight | PieceType::Centaur | PieceType::RoyalCentaur => 300,
+        PieceType::Camel | PieceType::Giraffe | PieceType::Zebra => 300,
+        PieceType::Knightrider => 400,
+        PieceType::Hawk => 350,
+        PieceType::Rose => 350,
+        PieceType::Guard | PieceType::Huygen => 250,
+        // Pawns and others have 0 weight for "Piece Cloud" centrality
+        _ => 0,
+    }
+}
+
 // Rook heuristics
 // Slightly increased based on Texel tuning (optimum around ~37), but kept
 // moderate so rooks are encouraged to activate without over-penalizing
@@ -214,25 +231,41 @@ const DEVELOPED_PHASE_ATTACK_SCALE: i32 = 100;
 pub fn compute_cloud_center(board: &Board) -> Option<Coordinate> {
     let mut sum_x: i64 = 0;
     let mut sum_y: i64 = 0;
-    let mut count: i64 = 0;
+    let mut total_weight: i64 = 0;
 
-    // BITBOARD: O(1) per tile summation using bitwise helpers
     for (cx, cy, tile) in board.tiles.iter() {
-        let bits = tile.occ_all & !tile.occ_void & !tile.occ_pawns;
+        let mut bits = tile.occ_all & !tile.occ_void & !tile.occ_pawns;
         if bits == 0 {
             continue;
         }
 
-        let n = bits.count_ones() as i64;
-        sum_x += n * cx * 8 + tile.sum_lx(bits) as i64;
-        sum_y += n * cy * 8 + tile.sum_ly(bits) as i64;
-        count += n;
+        while bits != 0 {
+            let idx = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+
+            let packed = tile.piece[idx];
+            // packed should not be 0 since bits came from occ_all
+            if packed == 0 {
+                continue;
+            }
+
+            let piece = crate::board::Piece::from_packed(packed);
+            let weight = get_centrality_weight(piece.piece_type());
+
+            if weight > 0 {
+                let x = cx * 8 + (idx % 8) as i64;
+                let y = cy * 8 + (idx / 8) as i64;
+                sum_x += weight * x;
+                sum_y += weight * y;
+                total_weight += weight;
+            }
+        }
     }
 
-    if count > 0 {
+    if total_weight > 0 {
         Some(Coordinate {
-            x: sum_x / count,
-            y: sum_y / count,
+            x: sum_x / total_weight,
+            y: sum_y / total_weight,
         })
     } else {
         None
@@ -487,12 +520,25 @@ pub fn evaluate_pieces(
             continue;
         }
 
-        let cloud_bits = tile.occ_all & !tile.occ_void & !tile.occ_pawns;
-        if cloud_bits != 0 {
-            let n = cloud_bits.count_ones() as i64;
-            cloud_sum_x += n * cx * 8 + tile.sum_lx(cloud_bits) as i64;
-            cloud_sum_y += n * cy * 8 + tile.sum_ly(cloud_bits) as i64;
-            cloud_count += n;
+        let mut cloud_bits = tile.occ_all & !tile.occ_void & !tile.occ_pawns;
+        while cloud_bits != 0 {
+            let idx = cloud_bits.trailing_zeros() as usize;
+            cloud_bits &= cloud_bits - 1;
+
+            let packed = tile.piece[idx];
+            if packed == 0 {
+                continue;
+            }
+            let piece = crate::board::Piece::from_packed(packed);
+            let weight = get_centrality_weight(piece.piece_type());
+
+            if weight > 0 {
+                let x = cx * 8 + (idx % 8) as i64;
+                let y = cy * 8 + (idx / 8) as i64;
+                cloud_sum_x += weight * x;
+                cloud_sum_y += weight * y;
+                cloud_count += weight;
+            }
         }
 
         /*
