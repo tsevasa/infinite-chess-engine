@@ -2398,6 +2398,10 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 game.undo_move(&se_m, se_undo);
 
                 if searcher.hot.stopped {
+                    // Restore searcher state before returning
+                    searcher.prev_move_stack[ply] = prev_entry_backup;
+                    searcher.move_history[ply] = move_history_backup;
+                    searcher.moved_piece_history[ply] = piece_history_backup;
                     return 0;
                 }
 
@@ -2429,6 +2433,10 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     penalty - searcher.tt_move_history * penalty.abs() / max_tt_hist;
 
                 game.undo_move(&m, undo);
+                // Restore searcher state before returning
+                searcher.prev_move_stack[ply] = prev_entry_backup;
+                searcher.move_history[ply] = move_history_backup;
+                searcher.moved_piece_history[ply] = piece_history_backup;
                 return beta;
             }
         }
@@ -2529,6 +2537,10 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     // and history is really bad, prune this move entirely.
                     if new_depth <= 0 && value < hlp_history_leaf() {
                         game.undo_move(&m, undo);
+                        // Restore searcher state before continuing
+                        searcher.prev_move_stack[ply] = prev_entry_backup;
+                        searcher.move_history[ply] = move_history_backup;
+                        searcher.moved_piece_history[ply] = piece_history_backup;
                         continue;
                     }
                 }
