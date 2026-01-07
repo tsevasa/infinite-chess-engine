@@ -2475,11 +2475,8 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
 
         legal_moves += 1;
 
-        // Calculate per-move extension
-        // Stockfish-style Singular Extension + Multi-Cut:
-        // When we're about to search the TT move at sufficient depth, first verify
-        // it's truly singular by doing a reduced search excluding it.
-        let mut extension: usize = 0;
+        // Calculate per-move extension (can be negative for negative extensions)
+        let mut extension: i32 = 0;
 
         let is_tt_move = tt_move
             .filter(|tt_m| m.from == tt_m.from && m.to == tt_m.to && m.promotion == tt_m.promotion)
@@ -2563,23 +2560,38 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             undo = new_undo;
 
             if se_best < singular_beta {
-                // TT move is singular - extend it
+                // TT move is singular - calculate extension level
+                // Double extension margin: how much below singular_beta for +2 extension
+                let double_margin = (depth as i32) * 2;
+                // Triple extension margin: how much below for +3 extension
+                let triple_margin = (depth as i32) * 4;
+
                 extension = 1;
+                if se_best < singular_beta - double_margin {
+                    extension = 2;
+                }
+                if se_best < singular_beta - triple_margin && is_pv {
+                    extension = 3;
+                }
             } else if se_best >= beta && !is_pv {
                 // Multi-cut: alternatives also beat beta, prune the whole subtree
-                // Apply negative penalty to TT Move History - the TT move wasn't truly singular
-                // Stockfish uses: max(-400 - 100 * depth, -4000)
                 let penalty = (-400 - 100 * depth as i32).max(-4000);
                 let max_tt_hist = 8192;
                 searcher.tt_move_history +=
                     penalty - searcher.tt_move_history * penalty.abs() / max_tt_hist;
 
                 game.undo_move(&m, undo);
-                // Restore searcher state before returning
                 searcher.prev_move_stack[ply] = prev_entry_backup;
                 searcher.move_history[ply] = move_history_backup;
                 searcher.moved_piece_history[ply] = piece_history_backup;
                 return beta;
+            } else if tt_value.is_some_and(|v| v >= beta) {
+                // Negative extension: TT move is assumed to fail high but wasn't singular
+                // Reduce depth to favor other moves
+                extension = -3;
+            } else if cut_node {
+                // On cut nodes, if TT move isn't assumed to fail high, reduce it
+                extension = -2;
             }
         }
 
@@ -2595,10 +2607,12 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 NodeType::Cut
             };
             // Full window search for first legal move
+            // Calculate new depth: base depth - 1 + extension (extension can be negative)
+            let new_depth = ((depth as i32) - 1 + extension).max(0) as usize;
             score = -negamax(&mut NegamaxContext {
                 searcher,
                 game,
-                depth: depth - 1 + extension,
+                depth: new_depth,
                 ply: ply + 1,
                 alpha: -beta,
                 beta: -alpha,
@@ -2651,19 +2665,12 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     reduction -= 1;
                 }
 
-                // Reduce less for forking piece checks (high tactical importance)
-                // if reduction > 0
-                //     && (gives_check && (p_type == PieceType::Queen || p_type == PieceType::Amazon))
-                // {
-                //     reduction -= 1;
-                // }
-
                 // Ensure reduction stays in valid range [0, depth-2]
                 reduction = reduction.clamp(0, (depth as i32) - 2);
             }
 
             // Base child depth after LMR (with singular extension if applicable)
-            let mut new_depth = depth as i32 - 1 + extension as i32 - reduction;
+            let mut new_depth = (depth as i32) - 1 + extension - reduction;
 
             // History Leaf Pruning (Fruit-style)
             // Only in non-PV, quiet, shallow nodes and after enough moves
@@ -2733,12 +2740,23 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 // Re-search with PV-like search if we're in PV, otherwise same child type
                 let research_type = if is_pv { NodeType::PV } else { child_type };
 
+                // LMR deeper/shallower re-search depth adjustment
+                // If reduced search returned good value, search deeper
+                // If it returned bad value, search shallower
+                let base_depth = (depth as i32) - 1 + extension;
+                let do_deeper_search =
+                    (search_depth as i32) < base_depth && s > (best_score + 43 + 2 * base_depth);
+                let do_shallower_search = s < best_score + 9;
+                let adjusted_depth = (base_depth + (do_deeper_search as i32)
+                    - (do_shallower_search as i32))
+                    .max(0) as usize;
+
                 // TT move extension: prevent dropping to qsearch if TT has decisive/deep info
                 // For PV nodes with the TT move, if about to go to qsearch and:
                 // - TT has mate score with depth > 0, OR
                 // - TT depth > 1
                 // then ensure minimum depth of 1
-                let mut pv_depth = depth - 1 + extension;
+                let mut pv_depth = adjusted_depth;
                 if is_pv && is_tt_move && pv_depth == 0 {
                     let has_decisive =
                         tt_value.is_some_and(|v| v.abs() > MATE_SCORE) && tt_depth > 0;
@@ -2827,6 +2845,13 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     searcher.pv_table[ply_base + 1 + j] = searcher.pv_table[child_base + j];
                 }
                 searcher.pv_length[ply] = child_len + 1;
+
+                // Depth reduction on alpha improvement
+                // Reduce depth for remaining moves after finding a score improvement.
+                // Balanced by hindsight depth adjustments and LMR deeper/shallower.
+                //     if depth > 2 && depth < 14 && score.abs() < MATE_SCORE {
+                //         depth -= 2;
+                //     }
             }
         }
 
