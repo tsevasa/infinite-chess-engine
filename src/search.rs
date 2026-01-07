@@ -599,10 +599,15 @@ pub struct Searcher {
     /// Used to adjust depth based on prior search decisions.
     pub reduction_stack: Vec<i32>,
 
+    /// Cutoff count per ply.
+    /// Tracks number of beta cutoffs at each ply.
+    /// Used to increase LMR when next ply has many fail highs.
+    pub cutoff_cnt: Vec<u8>,
+
     /// Dynamic move rule limit (e.g. 100 for 50-move rule)
     pub move_rule_limit: i32,
 
-    /// Low Ply History (Stockfish-style): [ply][move_hash] -> score
+    /// Low Ply History: [ply][move_hash] -> score
     /// Tracks which moves were successful at low plies (first 4 from root).
     /// Used to boost ordering for moves that worked well near root.
     pub low_ply_history: Box<[[i32; LOW_PLY_HISTORY_ENTRIES]; LOW_PLY_HISTORY_SIZE]>,
@@ -668,7 +673,8 @@ impl Searcher {
             lastmove_corrhist: Box::new([0i32; LASTMOVE_CORRHIST_SIZE]),
             tt_move_history: 0,
             reduction_stack: vec![0; MAX_PLY],
-            move_rule_limit: 100, // Default, will be updated from GameState
+            cutoff_cnt: vec![0; MAX_PLY + 2], // +2 for (ply+2) access pattern
+            move_rule_limit: 100,             // Default, will be updated from GameState
             low_ply_history: Box::new([[0i32; LOW_PLY_HISTORY_ENTRIES]; LOW_PLY_HISTORY_SIZE]),
         }
     }
@@ -731,7 +737,7 @@ impl Searcher {
         self.hot.best_previous_average_score = 0;
         self.hot.iter_values.fill(0);
         self.hot.iter_idx = 0;
-        self.hot.prev_time_reduction = 1.0; // Stockfish initializes this to 1.0 effectively
+        self.hot.prev_time_reduction = 1.0;
         self.hot.last_best_move_depth = 0;
 
         // Reset iterative deepening state
@@ -747,7 +753,7 @@ impl Searcher {
         // Reset TT move history - hits on the old TT are no longer relevant
         self.tt_move_history = 0;
 
-        // Stockfish: Fill lowPlyHistory with 97 at the start of iterative deepening
+        // Fill lowPlyHistory with 97 at the start of iterative deepening
         // (not 0, to give a small positive bias to moves that haven't been seen)
         for row in self.low_ply_history.iter_mut() {
             row.fill(97);
@@ -828,7 +834,7 @@ impl Searcher {
         *entry += clamped - *entry * clamped.abs() / max_h;
     }
 
-    /// Update low ply history (Stockfish-style) for moves that caused beta cutoff at low plies.
+    /// Update low ply history for moves that caused beta cutoff at low plies.
     /// Only updates for ply < LOW_PLY_HISTORY_SIZE (first 4 plies from root).
     #[inline]
     pub fn update_low_ply_history(&mut self, ply: usize, move_hash: usize, bonus: i32) {
@@ -1142,7 +1148,7 @@ fn search_with_searcher(
     let mut best_score = -INFINITY;
     let mut prev_root_move_coords: Option<(i64, i64, i64, i64)> = None;
 
-    // Initialize Stockfish-style time management
+    // Initialize time management
     // For now, use ply=0 as this is the root search
     searcher
         .hot
@@ -1152,7 +1158,7 @@ fn search_with_searcher(
     for depth in 1..=max_depth {
         searcher.reset_for_iteration();
 
-        // Age out PV variability metric (Stockfish line 317 - at START of each iteration)
+        // Age out PV variability metric at START of each iteration
         // Note: Decay the PERSISTED tot, not the per-iteration changes.
         searcher.hot.tot_best_move_changes /= 2.0;
 
@@ -1249,12 +1255,11 @@ fn search_with_searcher(
             break;
         }
 
-        // Stockfish-style Time Management Check
+        // Time Management Check
         if searcher.hot.time_limit_ms != u128::MAX {
             let elapsed = searcher.hot.timer.elapsed_ms() as f64;
 
             // Step 1: Effort tracking (Situational awareness of nodes spent on best move)
-            // Stockfish line 477-478: nodesEffort = rootMoves[0].effort * 100000 / nodes
             let nodes_effort = (searcher.hot.best_move_nodes as f64 * 100000.0)
                 / (searcher.hot.nodes as f64).max(1.0);
             let high_best_move_effort = if nodes_effort >= 93340.0 { 0.76 } else { 1.0 };
@@ -1284,7 +1289,7 @@ fn search_with_searcher(
             // CAP at 2.5 to prevent runaway time extensions
             let instability = (1.02 + 2.14 * searcher.hot.tot_best_move_changes).min(2.5);
 
-            // Total time calculation (Matching Stockfish line 497-498)
+            // Total time calculation
             // Clamp the total factors to prevent wild swings
             let total_factors =
                 (falling_eval * reduction * instability * high_best_move_effort).clamp(0.5, 2.5);
@@ -1303,11 +1308,11 @@ fn search_with_searcher(
                 break;
             }
 
-            // Update iter_values circular buffer AFTER the time check (Stockfish line 520)
+            // Update iter_values circular buffer AFTER the time check
             searcher.hot.iter_values[searcher.hot.iter_idx] = best_score;
             searcher.hot.iter_idx = (searcher.hot.iter_idx + 1) & 3;
 
-            // Update running average score (Stockfish: bestPreviousAverageScore)
+            // Update running average score
             if searcher.hot.best_previous_average_score == 0 {
                 searcher.hot.best_previous_average_score = best_score;
             } else {
@@ -1349,7 +1354,7 @@ pub fn get_best_move_threaded(
     // Initialize correction history hashes
     game.recompute_correction_hashes();
 
-    // Use persistent global searcher (Stockfish pattern)
+    // Use persistent global searcher
     GLOBAL_SEARCHER.with(|cell| {
         let mut opt = cell.borrow_mut();
 
@@ -1991,6 +1996,11 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     searcher.hot.nodes += 1;
     searcher.pv_length[ply] = 0;
 
+    // Initialize cutoff count for grandchild ply
+    if ply + 2 < MAX_PLY {
+        searcher.cutoff_cnt[ply + 2] = 0;
+    }
+
     // Time management and selective depth tracking
     if searcher.check_time() {
         return 0;
@@ -2619,6 +2629,15 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     reduction -= 1;
                 }
 
+                // Increase reduction if next ply has a lot of fail highs
+                // We use a simpler version: add 1 to reduction when many cutoffs
+                if ply + 1 < MAX_PLY && searcher.cutoff_cnt[ply + 1] > 2 {
+                    reduction += 1;
+                    if all_node {
+                        reduction += 1;
+                    }
+                }
+
                 // TT Move History adjustment:
                 // If TT moves have been unreliable (low tt_move_history), reduce less
                 // since the move ordering from TT may not be trustworthy.
@@ -2791,6 +2810,12 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         }
 
         if alpha >= beta {
+            // Increment cutoff count
+            // We increment for low-extension cutoffs or PV nodes
+            if (extension < 2 || is_pv) && ply < MAX_PLY {
+                searcher.cutoff_cnt[ply] = searcher.cutoff_cnt[ply].saturating_add(1);
+            }
+
             if !is_capture {
                 // History bonus for quiet cutoff move, with maluses for previously searched quiets
                 let idx = hash_move_dest(&m);
