@@ -2045,6 +2045,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     let hash = TranspositionTable::generate_hash(game);
     let mut tt_move: Option<Move> = None;
     let mut tt_value: Option<i32> = None;
+    let mut tt_depth: u8 = 0; // For TT move extension
 
     // Stockfish passes rule50_count (halfmove_clock) directly to value_from_tt
     let rule50_count = game.halfmove_clock;
@@ -2062,8 +2063,12 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     ) {
         tt_move = best;
         tt_value = Some(score);
+        // Get TT depth for qsearch extension decision
+        if let Some((_, d, _, _)) = searcher.tt.probe_for_singular(hash, ply) {
+            tt_depth = d;
+        }
         // In non-PV nodes, use TT cutoff if valid score returned
-        // Stockfish's "graph history interaction" workaround:
+        // "graph history interaction" workaround:
         // - Don't produce TT cutoffs when rule50 is high (>= 96)
         // - Don't produce TT cutoffs when position has repetition history
         // - Don't cutoff on mate scores (they need full verification at each depth)
@@ -2727,10 +2732,26 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             if s > alpha && (reduction > 0 || s < beta) {
                 // Re-search with PV-like search if we're in PV, otherwise same child type
                 let research_type = if is_pv { NodeType::PV } else { child_type };
+
+                // TT move extension: prevent dropping to qsearch if TT has decisive/deep info
+                // For PV nodes with the TT move, if about to go to qsearch and:
+                // - TT has mate score with depth > 0, OR
+                // - TT depth > 1
+                // then ensure minimum depth of 1
+                let mut pv_depth = depth - 1 + extension;
+                if is_pv && is_tt_move && pv_depth == 0 {
+                    let has_decisive =
+                        tt_value.is_some_and(|v| v.abs() > MATE_SCORE) && tt_depth > 0;
+                    let has_deep_tt = tt_depth > 1;
+                    if has_decisive || has_deep_tt {
+                        pv_depth = 1;
+                    }
+                }
+
                 s = -negamax(&mut NegamaxContext {
                     searcher,
                     game,
-                    depth: depth - 1 + extension,
+                    depth: pv_depth,
                     ply: ply + 1,
                     alpha: -beta,
                     beta: -alpha,
