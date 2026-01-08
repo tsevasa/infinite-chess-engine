@@ -24,13 +24,25 @@ pub use base::{EvalFeatures, reset_eval_features, snapshot_eval_features};
 /// Main evaluation entry point.
 #[inline]
 pub fn evaluate(game: &GameState) -> i32 {
-    match game.variant {
+    let raw_eval = match game.variant {
         Some(Variant::Chess) => variants::chess::evaluate(game),
         Some(Variant::ConfinedClassical) => variants::confined_classical::evaluate(game),
         Some(Variant::Obstocean) => variants::obstocean::evaluate(game),
         Some(Variant::PawnHorde) => variants::pawn_horde::evaluate(game),
         // Add new variants here as they get custom evaluators
         _ => base::evaluate(game), // Default: use base for all others
+    };
+
+    // Linear evaluation damping.
+    // As the halfmove clock increases during shuffling, we slightly damp the
+    // evaluation. This provides a gentle pressure to "get on with it" and
+    // avoid unnecessary repetitions or shuffling.
+    let rule_limit = game.game_rules.move_rule_limit.unwrap_or(100) as i32;
+    if rule_limit > 0 {
+        let divisor = 2 * rule_limit - 1;
+        raw_eval - (raw_eval * game.halfmove_clock as i32) / divisor
+    } else {
+        raw_eval
     }
 }
 
@@ -140,6 +152,59 @@ mod tests {
         // Should dispatch to Chess evaluator
         let _score = evaluate(&game);
         // Just verify it doesn't panic
+    }
+
+    #[test]
+    fn test_evaluate_rule50_damping() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(0, 0, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(1, 0, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.material_score = 1000;
+        game.turn = PlayerColor::White;
+        game.game_rules.move_rule_limit = Some(100);
+
+        let eval_0 = evaluate(&game);
+
+        game.halfmove_clock = 50;
+        let eval_50 = evaluate(&game);
+
+        game.halfmove_clock = 100;
+        let eval_100 = evaluate(&game);
+
+        // With 100-move rule limit (200 halfmoves), at 100 halfmoves
+        // the damping should be roughly halving the evaluation.
+        // Formula: v -= v * clock / (2 * limit - 1)
+        // v = 1000, clock = 50, limit = 100 -> 1000 - (1000 * 50 / 199) = 1000 - 251 = 749
+        // v = 1000, clock = 100, limit = 100 -> 1000 - (1000 * 100 / 199) = 1000 - 502 = 498
+
+        assert!(eval_50 < eval_0, "Eval should decrease at clock=50");
+        assert!(
+            eval_100 < eval_50,
+            "Eval should decrease further at clock=100"
+        );
+        assert!(eval_100 > 0, "Eval should not drop to 0 at the limit");
+
+        // Approximate values check
+        let delta_50 = eval_0 - eval_50;
+        let expected_delta_50 = (eval_0 * 50) / 199;
+        assert!(
+            (delta_50 - expected_delta_50).abs() < 2,
+            "Delta 50: expected {}, got {}",
+            expected_delta_50,
+            delta_50
+        );
+
+        let delta_100 = eval_0 - eval_100;
+        let expected_delta_100 = (eval_0 * 100) / 199;
+        assert!(
+            (delta_100 - expected_delta_100).abs() < 2,
+            "Delta 100: expected {}, got {}",
+            expected_delta_100,
+            delta_100
+        );
     }
 
     #[test]
