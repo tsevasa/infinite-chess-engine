@@ -966,73 +966,104 @@ impl GameState {
         true
     }
 
-    /// Get blocking squares for non-linear checkers (Rose, etc.)
-    /// Returns a list of intermediate squares that can be blocked to stop the attack.
-    /// For Rose: finds the spiral path used to attack and returns intermediate squares.
+    /// Compute blocking squares for non-linear checkers (Rose).
     ///
-    /// This is the generalized equivalent of `is_on_check_ray` for pieces that don't
-    /// attack in straight lines.
+    /// Algorithm:
+    /// 1. Find ALL spiral paths that can reach the target offset
+    /// 2. For each path, check if it's currently blocked by any piece
+    /// 3. If blocked, skip that path
+    /// 4. Collect ALL intermediate squares from unblocked paths
+    /// 5. If 1 path: return all intermediates (any block works)
+    /// 6. If N paths: return intersection (must block all)
     fn get_nonlinear_blocking_squares(
         &self,
         checker_sq: &Coordinate,
         king_sq: &Coordinate,
         checker_type: PieceType,
-    ) -> arrayvec::ArrayVec<Coordinate, 8> {
+    ) -> arrayvec::ArrayVec<Coordinate, 64> {
         use crate::moves::ROSE_SPIRALS;
 
-        let mut blocking = arrayvec::ArrayVec::<Coordinate, 8>::new();
+        let mut result = arrayvec::ArrayVec::<Coordinate, 64>::new();
 
-        // Rose blocking squares: find the spiral path from checker to king
-        // and return the intermediate squares
-        // NOTE: Other non-linear piece types can be added here in the future
-        // with their own blocking square logic
-        if checker_type == PieceType::Rose {
-            // Find which spiral the Rose used to reach the king
-            let dx = king_sq.x - checker_sq.x;
-            let dy = king_sq.y - checker_sq.y;
+        if checker_type != PieceType::Rose {
+            return result;
+        }
 
-            // Search through all spirals to find one that matches
-            for spiral_dirs in &ROSE_SPIRALS {
-                for spiral in spiral_dirs {
-                    for (hop_idx, &(cum_dx, cum_dy)) in spiral.iter().enumerate() {
-                        if cum_dx == dx && cum_dy == dy {
-                            // Found the spiral path! Verify it's unblocked and collect
-                            // intermediate squares
-                            let mut valid = true;
-                            for (i, &(prev_dx, prev_dy)) in spiral.iter().take(hop_idx).enumerate()
-                            {
-                                let check_x = checker_sq.x + prev_dx;
-                                let check_y = checker_sq.y + prev_dy;
+        let dx = king_sq.x - checker_sq.x;
+        let dy = king_sq.y - checker_sq.y;
 
-                                // Check if this intermediate square is blocked
-                                if self.board.get_piece(check_x, check_y).is_some() {
-                                    // This path is blocked, try next spiral
-                                    valid = false;
-                                    break;
-                                }
+        // Collect all unblocked paths with their intermediate squares
+        // Each path is a list of (absolute) intermediate coordinates
+        let mut valid_paths: arrayvec::ArrayVec<arrayvec::ArrayVec<Coordinate, 8>, 16> =
+            arrayvec::ArrayVec::new();
 
-                                // Collect intermediate squares (excluding if i == hop_idx-1
-                                // since that's the one already covered, but we take(hop_idx))
-                                if i < hop_idx {
-                                    blocking.push(Coordinate::new(check_x, check_y));
-                                }
-                            }
-
-                            if valid && !blocking.is_empty() {
-                                return blocking;
-                            } else if valid {
-                                // Direct hit (hop 0), no blocking squares
-                                return blocking;
-                            }
-                            // Clear and try next spiral
-                            blocking.clear();
-                        }
+        // Search all 16 spirals (8 start directions × 2 rotations)
+        for spiral_dirs in &ROSE_SPIRALS {
+            for spiral in spiral_dirs {
+                // Find which hop reaches target offset (if any)
+                let mut target_hop: Option<usize> = None;
+                for (hop_idx, &(cum_dx, cum_dy)) in spiral.iter().enumerate() {
+                    if cum_dx == dx && cum_dy == dy {
+                        target_hop = Some(hop_idx);
+                        break;
                     }
+                }
+
+                let target_hop = match target_hop {
+                    Some(h) => h,
+                    None => continue,
+                };
+
+                // Collect intermediate squares and check if path is blocked
+                let mut path_blocked = false;
+                let mut intermediates = arrayvec::ArrayVec::<Coordinate, 8>::new();
+
+                for &(int_dx, int_dy) in spiral.iter().take(target_hop) {
+                    let sq = Coordinate::new(checker_sq.x + int_dx, checker_sq.y + int_dy);
+
+                    // Check if this intermediate square is occupied
+                    if self.board.get_piece(sq.x, sq.y).is_some() {
+                        path_blocked = true;
+                        break;
+                    }
+
+                    intermediates.push(sq);
+                }
+
+                if !path_blocked {
+                    valid_paths.push(intermediates);
                 }
             }
         }
 
-        blocking
+        // No unblocked paths - shouldn't happen if we're in check
+        if valid_paths.is_empty() {
+            return result;
+        }
+
+        // Single path: return ALL its intermediate squares
+        if valid_paths.len() == 1 {
+            for sq in &valid_paths[0] {
+                result.push(*sq);
+            }
+            return result;
+        }
+
+        // Multiple paths: return INTERSECTION of all paths
+        // Only squares common to all paths can block all attacks
+        if let Some((first, rest)) = valid_paths.split_first() {
+            for sq in first {
+                let on_all_paths = rest
+                    .iter()
+                    .all(|path| path.iter().any(|p| p.x == sq.x && p.y == sq.y));
+
+                if on_all_paths && result.len() < 64 {
+                    result.push(*sq);
+                }
+            }
+        }
+
+        result
     }
 
     /// Initialize starting_squares from the current board: all non-pawn,
@@ -1565,7 +1596,7 @@ impl GameState {
         let nonlinear_blocking_squares = if is_nonlinear_checker {
             self.get_nonlinear_blocking_squares(&checker_sq, &king_sq, checker_type)
         } else {
-            arrayvec::ArrayVec::<Coordinate, 8>::new()
+            arrayvec::ArrayVec::<Coordinate, 64>::new()
         };
 
         let check_dist = dx_check.abs().max(dy_check.abs());
@@ -1800,8 +1831,43 @@ impl GameState {
                 }
             }
 
-            // Regular slider blocking for non-Huygen checkers
-            if is_slider && can_ortho && !is_huygen_checker {
+            // ==========================================
+            // OPTIMIZED SLIDER BLOCKING FOR ROSE CHECKERS
+            // For Rose checks, blocking squares are precomputed.
+            // Generate moves to each reachable blocking square.
+            // ==========================================
+            if is_nonlinear_checker && (can_ortho || can_diag) {
+                for block_sq in &nonlinear_blocking_squares {
+                    // Check if this slider can reach the blocking square
+                    if can_ortho {
+                        // Check same row or column
+                        if from.x == block_sq.x && from.y != block_sq.y {
+                            // Same column - check path clear
+                            if s.is_path_clear_for_rook(&from, block_sq) {
+                                out.push(Move::new(from, *block_sq, *piece));
+                            }
+                        } else if from.y == block_sq.y && from.x != block_sq.x {
+                            // Same row - check path clear
+                            if s.is_path_clear_for_rook(&from, block_sq) {
+                                out.push(Move::new(from, *block_sq, *piece));
+                            }
+                        }
+                    }
+                    if can_diag {
+                        // Check same diagonal
+                        let dx = block_sq.x - from.x;
+                        let dy = block_sq.y - from.y;
+                        if dx != 0 && dx.abs() == dy.abs() {
+                            if s.is_path_clear_for_bishop(&from, block_sq) {
+                                out.push(Move::new(from, *block_sq, *piece));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Regular slider blocking for non-Huygen, non-Rose checkers (linear attack patterns)
+            if is_slider && can_ortho && !is_huygen_checker && !is_nonlinear_checker {
                 // Horizontal line y=from.y intersects check ray
                 if step_y != 0 {
                     let k = (from.y - king_sq.y) / step_y;
