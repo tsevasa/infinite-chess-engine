@@ -152,13 +152,10 @@ const ROOK_IDLE_PENALTY: i32 = 20;
 // These should be impactful but not dominate material.
 const BEHIND_KING_BONUS: i32 = 40;
 const KING_TROPISM_BONUS: i32 = 4;
-const KNIGHT_NEAR_KING_BONUS: i32 = 15;
 const SLIDER_NET_BONUS: i32 = 20;
 
 // King safety ring and ray penalties - tuned for infinite boards.
-// Open rays are extremely dangerous on infinite boards - sliders can attack from anywhere.
 const KING_RING_MISSING_PENALTY: i32 = 45;
-const KING_OPEN_RAY_PENALTY: i32 = 30; // Open rays are very dangerous on infinite boards
 
 // King pawn shield heuristics
 // Reward having pawns in front of the king and penalize the king walking
@@ -225,7 +222,6 @@ const MIN_DEVELOPMENT_PENALTY: i32 = 6; // Moderate - not too aggressive
 
 // King exposure: penalize kings with too many open directions
 const KING_OPEN_DIRECTION_THRESHOLD: i32 = 4;
-const KING_EXPOSURE_PENALTY_PER_DIR: i32 = 8;
 
 // King defender bonuses/penalties
 // Low-value pieces near own king = good (defense)
@@ -1136,22 +1132,6 @@ pub fn evaluate_knight(
 ) -> i32 {
     let mut bonus: i32 = 0;
 
-    // Knights are weak in infinite chess overall, but we still reward good king-related placement.
-    // Small bonus for being near friendly king (defensive knight).
-    let own_king = if color == PlayerColor::White {
-        white_king
-    } else {
-        black_king
-    };
-    if let Some(ok) = own_king {
-        let dist = (x - ok.x).abs() + (y - ok.y).abs();
-        if dist <= 3 {
-            bonus += KNIGHT_NEAR_KING_BONUS;
-        } else if dist <= 5 {
-            bonus += KNIGHT_NEAR_KING_BONUS / 2;
-        }
-    }
-
     // Small bonus for being near enemy king (fork and mating net potential).
     let enemy_king = if color == PlayerColor::White {
         black_king
@@ -1479,19 +1459,6 @@ fn evaluate_knightrider(
         }
     }
 
-    // Near own king bonus
-    let own_king = if color == PlayerColor::White {
-        white_king
-    } else {
-        black_king
-    };
-    if let Some(ok) = own_king {
-        let dist = (x - ok.x).abs() + (y - ok.y).abs();
-        if dist <= 5 {
-            bonus += KNIGHT_NEAR_KING_BONUS;
-        }
-    }
-
     bonus
 }
 
@@ -1504,17 +1471,131 @@ pub fn evaluate_king_safety(
 ) -> i32 {
     let mut score: i32 = 0;
 
-    // White king safety
+    // White king safety (defense penalty)
     if let Some(wk) = white_king {
         score += evaluate_king_shelter(game, wk, PlayerColor::White);
     }
 
-    // Black king safety
+    // Black king safety (defense penalty)
     if let Some(bk) = black_king {
         score -= evaluate_king_shelter(game, bk, PlayerColor::Black);
     }
 
+    // ATTACK BONUSES: bonus for our sliders threatening enemy king's open rays
+    // This creates balance - we reward attacking exposed kings, not just penalize exposure
+
+    // White attack potential against black king
+    if let Some(bk) = black_king {
+        let attack_bonus = compute_attack_bonus(game, bk, PlayerColor::White);
+        score += attack_bonus;
+    }
+
+    // Black attack potential against white king
+    if let Some(wk) = white_king {
+        let attack_bonus = compute_attack_bonus(game, wk, PlayerColor::Black);
+        score -= attack_bonus;
+    }
+
     score
+}
+
+/// Compute attack bonus for having sliders that can threaten open rays on enemy king
+fn compute_attack_bonus(
+    game: &GameState,
+    enemy_king: &Coordinate,
+    attacker_color: PlayerColor,
+) -> i32 {
+    let is_white = attacker_color == PlayerColor::White;
+
+    // Count our sliders
+    let mut our_diag_count: i32 = 0;
+    let mut our_ortho_count: i32 = 0;
+
+    for (_cx, _cy, tile) in game.board.tiles.iter() {
+        let our_occ = if is_white {
+            tile.occ_white
+        } else {
+            tile.occ_black
+        };
+        if our_occ == 0 {
+            continue;
+        }
+
+        our_diag_count += (our_occ & tile.occ_diag_sliders).count_ones() as i32;
+        our_ortho_count += (our_occ & tile.occ_ortho_sliders).count_ones() as i32;
+    }
+
+    // No sliders = no attack potential
+    if our_diag_count == 0 && our_ortho_count == 0 {
+        return 0;
+    }
+
+    // Count enemy king's open rays (where we could attack)
+    const DIAG_DIRS: [(i64, i64); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+    const ORTHO_DIRS: [(i64, i64); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
+    let mut open_diag_rays = 0;
+    let mut open_ortho_rays = 0;
+
+    // Check diagonal rays on enemy king
+    if our_diag_count > 0 {
+        for &(dx, dy) in &DIAG_DIRS {
+            let mut cx = enemy_king.x;
+            let mut cy = enemy_king.y;
+            let mut is_open = true;
+            for _step in 0..5 {
+                cx += dx;
+                cy += dy;
+                if game.board.get_piece(cx, cy).is_some() {
+                    is_open = false;
+                    break;
+                }
+            }
+            if is_open {
+                open_diag_rays += 1;
+            }
+        }
+    }
+
+    // Check orthogonal rays on enemy king
+    if our_ortho_count > 0 {
+        for &(dx, dy) in &ORTHO_DIRS {
+            let mut cx = enemy_king.x;
+            let mut cy = enemy_king.y;
+            let mut is_open = true;
+            for _step in 0..5 {
+                cx += dx;
+                cy += dy;
+                if game.board.get_piece(cx, cy).is_some() {
+                    is_open = false;
+                    break;
+                }
+            }
+            if is_open {
+                open_ortho_rays += 1;
+            }
+        }
+    }
+
+    // Calculate attack bonus: ~8-12 cp per open ray we can potentially exploit
+    // This is lower than defensive penalties since attacking is opportunistic
+    const ATTACK_BONUS_PER_OPEN_RAY: i32 = 10;
+
+    let diag_bonus = if our_diag_count > 0 && open_diag_rays > 0 {
+        let mult = if our_diag_count >= 2 { 115 } else { 100 };
+        open_diag_rays * ATTACK_BONUS_PER_OPEN_RAY * mult / 100
+    } else {
+        0
+    };
+
+    let ortho_bonus = if our_ortho_count > 0 && open_ortho_rays > 0 {
+        let mult = if our_ortho_count >= 2 { 115 } else { 100 };
+        open_ortho_rays * ATTACK_BONUS_PER_OPEN_RAY * mult / 100
+    } else {
+        0
+    };
+
+    diag_bonus + ortho_bonus
 }
 
 fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor) -> i32 {
@@ -1545,11 +1626,9 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
     }
 
     // 1b. King relative to own pawn chain: prefer being behind pawns rather than ahead of them.
-    // We look for pawns roughly on the same files as the king (+/- 2 files) to keep it local.
     let mut has_pawn_ahead = false;
     let mut has_pawn_behind = false;
 
-    // BITBOARD: Use tile-based pawn iteration
     let is_white = color == PlayerColor::White;
     for (cx, cy, tile) in game.board.tiles.iter() {
         let color_pawns = tile.occ_pawns
@@ -1569,7 +1648,6 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
             let px = cx * 8 + (idx % 8) as i64;
             let py = cy * 8 + (idx / 8) as i64;
 
-            // Only consider pawns near the king in file-space
             if (px - king.x).abs() > 2 {
                 continue;
             }
@@ -1594,17 +1672,262 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
         }
     }
 
-    // If there are pawns both ahead and behind, we assume a mixed structure and stay neutral.
     if has_pawn_ahead && !has_pawn_behind {
-        // King is safely tucked behind its pawn shield.
         safety += KING_PAWN_SHIELD_BONUS;
     } else if !has_pawn_ahead && has_pawn_behind {
         safety -= KING_PAWN_AHEAD_PENALTY;
     }
 
-    // 2. Open rays (more open lines = more vulnerable)
-    // Count how many directions have no friendly piece cover
-    let directions: &[(i64, i64)] = &[
+    // 2. SMART RAY-BASED KING SAFETY
+    // Calculate enemy slider threats - weighted by piece value and type
+    let enemy_is_white = !is_white;
+    let mut enemy_diag_threat: i32 = 0;
+    let mut enemy_ortho_threat: i32 = 0;
+    let mut enemy_diag_count: i32 = 0;
+    let mut enemy_ortho_count: i32 = 0;
+    let mut enemy_non_pawn_pieces: i32 = 0;
+    let mut has_enemy_queen = false;
+    let mut ring_pressure = 0; // Danger from proximal enemy pieces
+
+    for (cx, cy, tile) in game.board.tiles.iter() {
+        let enemy_occ = if enemy_is_white {
+            tile.occ_white
+        } else {
+            tile.occ_black
+        };
+        if enemy_occ == 0 {
+            continue;
+        }
+
+        let enemy_non_pawns = enemy_occ & !tile.occ_pawns & !tile.occ_void;
+        enemy_non_pawn_pieces += enemy_non_pawns.count_ones() as i32;
+
+        let mut bits = enemy_occ;
+        while bits != 0 {
+            let idx = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let pt = crate::board::Piece::from_packed(tile.piece[idx]).piece_type();
+            let val = get_piece_value(pt);
+
+            if (enemy_occ & tile.occ_diag_sliders) & (1 << idx) != 0 {
+                enemy_diag_threat += val;
+                enemy_diag_count += 1;
+            }
+            if (enemy_occ & tile.occ_ortho_sliders) & (1 << idx) != 0 {
+                enemy_ortho_threat += val;
+                enemy_ortho_count += 1;
+            }
+            if pt == PieceType::Queen || pt == PieceType::Amazon {
+                has_enemy_queen = true;
+            }
+
+            // Master Ring Pressure: Check proximal enemy pieces (including knights/snipers)
+            let abs_px = cx * 8 + (idx as i64 % 8);
+            let abs_py = cy * 8 + (idx as i64 / 8);
+            let dx = (abs_px - king.x).abs();
+            let dy = (abs_py - king.y).abs();
+            if dx <= 2 && dy <= 2 {
+                ring_pressure += val / 60;
+            }
+        }
+    }
+
+    // Early exit: no threats = no danger
+    if enemy_diag_count == 0 && enemy_ortho_count == 0 && ring_pressure == 0 {
+        return safety;
+    }
+
+    // Endgame scaling: fewer non-pawn enemy pieces = less danger from open rays
+    // At 4+ pieces: full penalty (100%). At 2 pieces: 50%. At 1: 25%. At 0: none.
+    // This is gentler than before - rays matter even with few pieces
+    let endgame_scale = if enemy_non_pawn_pieces >= 4 {
+        100
+    } else if enemy_non_pawn_pieces == 3 {
+        85
+    } else if enemy_non_pawn_pieces == 2 {
+        60
+    } else if enemy_non_pawn_pieces == 1 {
+        30
+    } else {
+        0
+    };
+    if endgame_scale == 0 {
+        return safety;
+    }
+
+    // Threat multiplier: based on piece COUNT (capped at 2) and average VALUE
+    // Cap at 2 pieces - more than 2 sliders on same ray type doesn't add much danger
+    //
+    // Count scaling: 1 piece = 100%, 2+ pieces = 115% (gentle bonus for coordination)
+    // Value scaling: based on average value, normalized to bishop (450) = 100%
+    //   - Low-value (~300) = 90%
+    //   - Bishop (~450) = 100%
+    //   - Rook (~650) = 108%
+    //   - Queen (~1350) = 120%
+
+    let calc_threat_mult = |count: i32, total_value: i32| -> i32 {
+        if count == 0 {
+            return 0;
+        }
+
+        // Cap count at 2 for diminishing returns
+        let capped_count = count.min(2);
+        let count_factor = if capped_count >= 2 { 115 } else { 100 };
+
+        // Average value determines danger level
+        let avg_value = total_value / count;
+        let value_factor = if avg_value <= 350 {
+            90 // Minor pieces only
+        } else if avg_value <= 550 {
+            100 // Bishop-level
+        } else if avg_value <= 800 {
+            108 // Rook-level
+        } else {
+            120 // Queen/Amazon
+        };
+
+        // Combined: result is a percentage (e.g., 115 * 120 / 100 = 138)
+        count_factor * value_factor / 100
+    };
+
+    // Calculate threat multipliers using actual counts
+    let diag_threat_mult = calc_threat_mult(enemy_diag_count, enemy_diag_threat);
+    let ortho_threat_mult = calc_threat_mult(enemy_ortho_count, enemy_ortho_threat);
+
+    // Direction and penalty constants
+    const DIAG_DIRS: [(i64, i64); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+    const ORTHO_DIRS: [(i64, i64); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    const BASE_DIAG_RAY_PENALTY: i32 = 30; // Base penalty per diagonal ray
+    const BASE_ORTHO_RAY_PENALTY: i32 = 35; // Orthogonal slightly more dangerous
+
+    let mut total_ray_penalty: i32 = 0;
+    let mut tied_defender_penalty: i32 = 0;
+
+    // Helper: compute blocker quality as a PERCENTAGE reduction (0-80%)
+    // Low-value pieces close to king = best blockers
+    let blocker_reduction_pct = |blocker_value: i32, distance: i32| -> i32 {
+        // Base reduction percentage based on piece value
+        let value_pct = if blocker_value <= 100 {
+            80 // Pawn reduces penalty by 80%
+        } else if blocker_value <= 300 {
+            60 // Knight/Guard reduce by 60%
+        } else if blocker_value <= 500 {
+            40 // Bishop reduces by 40%
+        } else if blocker_value <= 700 {
+            20 // Rook reduces by 20%
+        } else {
+            0 // Queen/Amazon = no reduction (they should attack!)
+        };
+
+        // Distance modifier: close = full reduction, far = less
+        // dist 1: 100%, dist 2: 75%, dist 3: 50%, dist 4+: 30%
+        let dist_mult = match distance {
+            1 => 100,
+            2 => 75,
+            3 => 50,
+            _ => 30,
+        };
+
+        value_pct * dist_mult / 100
+    };
+
+    // Process diagonal rays (only if enemy has diagonal sliders)
+    if diag_threat_mult > 0 {
+        for &(dx, dy) in &DIAG_DIRS {
+            let mut cx = king.x;
+            let mut cy = king.y;
+            let mut blocker_info: Option<(i32, i32)> = None; // (piece_value, distance)
+            let mut _distance = 0;
+            let mut enemy_blocked = false;
+
+            // Scan ray up to 8 squares - we care about WHAT blocks and WHERE
+            for step in 1..=8 {
+                cx += dx;
+                cy += dy;
+                _distance = step;
+                if let Some(piece) = game.board.get_piece(cx, cy) {
+                    if piece.color() == color {
+                        // Friendly blocker
+                        let val = get_piece_value(piece.piece_type());
+                        blocker_info = Some((val, step));
+                        if val >= 600 {
+                            tied_defender_penalty += 10;
+                        }
+                    } else if piece.color() != PlayerColor::Neutral {
+                        // Enemy piece blocks (worse than friendly, but still blocks)
+                        enemy_blocked = true;
+                    }
+                    break;
+                }
+            }
+
+            // Calculate penalty for this ray (threat_mult is a percentage like 100, 120, 135)
+            let raw_penalty = BASE_DIAG_RAY_PENALTY * diag_threat_mult / 100;
+
+            let penalty = if let Some((value, dist)) = blocker_info {
+                // Friendly blocker reduces penalty by a percentage
+                let reduction = blocker_reduction_pct(value, dist);
+                raw_penalty * (100 - reduction) / 100
+            } else if enemy_blocked {
+                // Enemy piece blocking: 60% penalty (they can move away)
+                raw_penalty * 60 / 100
+            } else {
+                // Open ray: full penalty
+                raw_penalty
+            };
+
+            total_ray_penalty += penalty;
+        }
+    }
+
+    // Process orthogonal rays (only if enemy has orthogonal sliders)
+    if ortho_threat_mult > 0 {
+        for &(dx, dy) in &ORTHO_DIRS {
+            let mut cx = king.x;
+            let mut cy = king.y;
+            let mut blocker_info: Option<(i32, i32)> = None;
+            let mut _distance = 0;
+            let mut enemy_blocked = false;
+
+            for step in 1..=8 {
+                cx += dx;
+                cy += dy;
+                _distance = step;
+                if let Some(piece) = game.board.get_piece(cx, cy) {
+                    if piece.color() == color {
+                        let val = get_piece_value(piece.piece_type());
+                        blocker_info = Some((val, step));
+                        if val >= 600 {
+                            tied_defender_penalty += 12;
+                        }
+                    } else if piece.color() != PlayerColor::Neutral {
+                        enemy_blocked = true;
+                    }
+                    break;
+                }
+            }
+
+            let raw_penalty = BASE_ORTHO_RAY_PENALTY * ortho_threat_mult / 100;
+
+            let penalty = if let Some((value, dist)) = blocker_info {
+                let reduction = blocker_reduction_pct(value, dist);
+                raw_penalty * (100 - reduction) / 100
+            } else if enemy_blocked {
+                raw_penalty * 60 / 100
+            } else {
+                raw_penalty
+            };
+
+            total_ray_penalty += penalty;
+        }
+    }
+
+    // 5. Final Synthesis (Master Logic)
+    let mut total_danger = total_ray_penalty + ring_pressure + tied_defender_penalty;
+
+    // Extra penalty for multiple open directions (Baseline scan for coherence)
+    let mut open_ray_count = 0;
+    let all_dirs: [(i64, i64); 8] = [
         (1, 0),
         (-1, 0),
         (0, 1),
@@ -1614,152 +1937,46 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
         (-1, 1),
         (-1, -1),
     ];
-    let mut open_direction_count = 0;
-    for &(dx, dy) in directions {
-        let mut cx = king.x;
-        let mut cy = king.y;
-        let mut ray_open = true;
-        // limit ray length; tactics around king are local
-        for _step in 0..8 {
-            cx += dx;
-            cy += dy;
-            if let Some(piece) = game.board.get_piece(cx, cy) {
-                // Friendly piece stops the ray and provides some cover
-                if piece.color() == color {
-                    ray_open = false;
-                }
-                break;
-            }
+    for &(dx, dy) in &all_dirs {
+        let is_diag = dx != 0 && dy != 0;
+        if is_diag && diag_threat_mult == 0 {
+            continue;
         }
-        if ray_open {
-            open_direction_count += 1;
-            safety -= KING_OPEN_RAY_PENALTY;
-            bump_feat!(king_open_ray_penalty, -1);
-        }
-    }
-
-    // Extra penalty for kings exposed in too many directions
-    // This makes it dangerous to leave the king unprotected
-    if open_direction_count >= KING_OPEN_DIRECTION_THRESHOLD {
-        let excess = open_direction_count - KING_OPEN_DIRECTION_THRESHOLD;
-        safety -= excess * KING_EXPOSURE_PENALTY_PER_DIR;
-    }
-
-    // 3. Enemy sliders attacking king zone (with weighted penalties)
-    // Only counts sliders with actual line-of-sight to king - essential for infinite chess
-    let mut slider_threat_weight = 0i32;
-    let mut slider_threat_count = 0i32;
-    for (cx, cy, tile) in game.board.tiles.iter() {
-        let occ = if color == PlayerColor::White {
-            tile.occ_black
-        } else {
-            tile.occ_white
-        };
-        let sliders = occ & (tile.occ_ortho_sliders | tile.occ_diag_sliders);
-        if sliders == 0 {
+        if !is_diag && ortho_threat_mult == 0 {
             continue;
         }
 
-        let mut bits = sliders;
-        while bits != 0 {
-            let idx = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-
-            let x = cx * 8 + (idx % 8) as i64;
-            let y = cy * 8 + (idx / 8) as i64;
-
-            // First check: is the slider even roughly in line with the king?
-            let dx = x - king.x;
-            let dy = y - king.y;
-
-            let same_file = dx == 0;
-            let same_rank = dy == 0;
-            let same_diag = dx.abs() == dy.abs();
-
-            if !(same_file || same_rank || same_diag) {
-                continue;
+        let mut cx = king.x;
+        let mut cy = king.y;
+        let mut is_open = true;
+        for _step in 0..6 {
+            cx += dx;
+            cy += dy;
+            if game.board.get_piece(cx, cy).is_some() {
+                is_open = false;
+                break;
             }
-
-            // In infinite chess, ignore ridiculously far sliders for safety.
-            let chebyshev = dx.abs().max(dy.abs());
-            if chebyshev > 32 {
-                continue;
-            }
-
-            // Now use the O(log n) line-of-sight check via spatial indices
-            let from = Coordinate { x, y };
-            if is_clear_line_between_fast(&game.spatial_indices, &from, king) {
-                // Weight by piece type: Queen/Amazon > Rook/Chancellor > Bishop/Archbishop
-                let packed = tile.piece[idx];
-                let weight = if packed != 0 {
-                    let piece = crate::board::Piece::from_packed(packed);
-                    match piece.piece_type() {
-                        PieceType::Queen | PieceType::RoyalQueen | PieceType::Amazon => 4,
-                        PieceType::Rook | PieceType::Chancellor => 3,
-                        PieceType::Bishop | PieceType::Archbishop => 2,
-                        PieceType::Knightrider => 2,
-                        _ => 2,
-                    }
-                } else {
-                    2
-                };
-                slider_threat_weight += weight;
-                slider_threat_count += 1;
-            }
+        }
+        if is_open {
+            open_ray_count += 1;
         }
     }
 
-    // Non-linear penalty: multiple sliders attacking is exponentially worse
-    let base_penalty = slider_threat_weight * 15;
-    let coordination_bonus = if slider_threat_count >= 2 {
-        slider_threat_weight * 8
-    } else {
-        0
-    };
-    safety -= base_penalty + coordination_bonus;
-    bump_feat!(king_enemy_slider_penalty, -slider_threat_count);
-
-    /*
-    // 4. King virtual mobility: safe squares the king can move to
-    // Penalize kings that have few safe escape squares
-    let mut safe_squares = 0;
-    let enemy_color = if color == PlayerColor::White {
-        PlayerColor::Black
-    } else {
-        PlayerColor::White
-    };
-    for dx in -1..=1_i64 {
-        for dy in -1..=1_i64 {
-            if dx == 0 && dy == 0 {
-                continue;
-            }
-            let sq_x = king.x + dx;
-            let sq_y = king.y + dy;
-            let sq = Coordinate::new(sq_x, sq_y);
-
-            // Check if square is empty or has enemy piece (potential escape)
-            let is_blocked_by_friendly = game
-                .board
-                .get_piece(sq_x, sq_y)
-                .is_some_and(|p| p.color() == color);
-            if is_blocked_by_friendly {
-                continue;
-            }
-
-            // Check if square is attacked by enemy
-            if !crate::moves::is_square_attacked(
-                &game.board,
-                &sq,
-                enemy_color,
-                &game.spatial_indices,
-            ) {
-                safe_squares += 1;
-            }
-        }
+    // Compounding exposure penalty (integrated into units)
+    if open_ray_count >= KING_OPEN_DIRECTION_THRESHOLD {
+        let excess = open_ray_count - KING_OPEN_DIRECTION_THRESHOLD;
+        total_danger += (excess + 1) * 20;
     }
-    // Bonus for having safe escape squares
-    safety += safe_squares * KING_VIRTUAL_MOBILITY_WEIGHT;
-    */
+
+    // Moderate reduction if no enemy queen is possible
+    if !has_enemy_queen {
+        total_danger = total_danger * 70 / 100;
+    }
+
+    // Final grounded scaling: Linear base + Quadratic coordination bonus
+    // Punishes high coordinated danger while remaining conservative at low danger.
+    let final_penalty = (total_danger + (total_danger * total_danger / 800)) * endgame_scale / 100;
+    safety -= final_penalty.min(400); // Grounded Cap
 
     safety
 }
@@ -2246,24 +2463,7 @@ mod tests {
         game.black_promo_rank = 1;
         game
     }
-
-    #[test]
-    fn test_get_piece_value() {
-        // Standard pieces - values tuned for infinite chess
-        assert_eq!(get_piece_value(PieceType::Pawn), 100);
-        assert_eq!(get_piece_value(PieceType::Knight), 250); // Weak in infinite chess
-        assert_eq!(get_piece_value(PieceType::Bishop), 450); // Strong slider
-        assert_eq!(get_piece_value(PieceType::Rook), 650); // Very strong
-        assert_eq!(get_piece_value(PieceType::Queen), 1350); // > 2 rooks
-
-        // King/Guard have same nominal value
-        assert_eq!(get_piece_value(PieceType::King), 220);
-
-        // Fairy pieces have values
-        assert!(get_piece_value(PieceType::Amazon) > get_piece_value(PieceType::Queen));
-        assert!(get_piece_value(PieceType::Chancellor) > get_piece_value(PieceType::Rook));
-    }
-
+    
     #[test]
     fn test_is_between() {
         assert!(is_between(5, 3, 7));

@@ -221,7 +221,7 @@ mod tests {
             rook_val > bishop_val,
             "Rook should be worth more than bishop"
         );
-        assert!(bishop_val >= knight_val, "Bishop should be worth >= knight");
+        assert!(bishop_val > knight_val, "Bishop should be worth more than knight");
         assert!(
             knight_val > pawn_val,
             "Knight should be worth more than pawn"
