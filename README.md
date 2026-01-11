@@ -98,7 +98,8 @@ const gameState = {
     ],
     game_rules: {
         promotion_ranks: { white: ["8"], black: ["1"] },
-        promotions_allowed: ["q", "r", "b", "n"]
+        promotions_allowed: ["q", "r", "b", "n"],
+        win_conditions: { white: ["checkmate"], black: ["checkmate"] }
     }
 };
 ```

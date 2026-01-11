@@ -396,7 +396,7 @@ impl Engine {
         };
 
         // Parse game rules from JS
-        let mut game_rules = if let Some(js_rules) = js_game.game_rules {
+        let game_rules = if let Some(js_rules) = js_game.game_rules {
             use game::{GameRules, PromotionRanks, WinCondition};
 
             let promotion_ranks = js_rules.promotion_ranks.map(|pr| PromotionRanks {
@@ -412,24 +412,47 @@ impl Engine {
                     .collect(),
             });
 
-            // Parse win conditions - use the first condition from each side's array.
-            // white_win_condition = what White must do to beat Black (how White wins)
-            // black_win_condition = what Black must do to beat White (how Black wins)
+            // Parse win conditions - use a tier system to pick the most relevant one.
+            // Priority: Checkmate > RoyalCapture > AllRoyalsCaptured > AllPiecesCaptured
+            // Fallback: Checkmate
+            let select_wc = |provided: &Vec<String>, opponent_has_royal: bool| {
+                if !opponent_has_royal {
+                    return WinCondition::AllPiecesCaptured;
+                }
+                let parsed: Vec<WinCondition> =
+                    provided.iter().filter_map(|s| s.parse().ok()).collect();
+                if parsed.contains(&WinCondition::Checkmate) {
+                    WinCondition::Checkmate
+                } else if parsed.contains(&WinCondition::RoyalCapture) {
+                    WinCondition::RoyalCapture
+                } else if parsed.contains(&WinCondition::AllRoyalsCaptured) {
+                    WinCondition::AllRoyalsCaptured
+                } else if parsed.contains(&WinCondition::AllPiecesCaptured) {
+                    WinCondition::AllPiecesCaptured
+                } else {
+                    WinCondition::Checkmate // Default
+                }
+            };
+
             let (white_win_condition, black_win_condition) =
                 if let Some(wc) = js_rules.win_conditions {
-                    let white_wc = wc
-                        .white
-                        .first()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(WinCondition::Checkmate);
-                    let black_wc = wc
-                        .black
-                        .first()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(WinCondition::Checkmate);
-                    (white_wc, black_wc)
+                    (
+                        select_wc(&wc.white, black_has_royal),
+                        select_wc(&wc.black, white_has_royal),
+                    )
                 } else {
-                    (WinCondition::Checkmate, WinCondition::Checkmate)
+                    (
+                        if black_has_royal {
+                            WinCondition::Checkmate
+                        } else {
+                            WinCondition::AllPiecesCaptured
+                        },
+                        if white_has_royal {
+                            WinCondition::Checkmate
+                        } else {
+                            WinCondition::AllPiecesCaptured
+                        },
+                    )
                 };
 
             let mut rules = GameRules {
@@ -445,17 +468,6 @@ impl Engine {
         } else {
             game::GameRules::default()
         };
-
-        // If a side has no royal pieces, the OPPONENT can't checkmate them, so the
-        // opponent's win condition must be AllPiecesCaptured instead of Checkmate.
-        // - If White has no royal: Black beats White via AllPiecesCaptured → set black_win_condition
-        // - If Black has no royal: White beats Black via AllPiecesCaptured → set white_win_condition
-        if !white_has_royal {
-            game_rules.black_win_condition = game::WinCondition::AllPiecesCaptured;
-        }
-        if !black_has_royal {
-            game_rules.white_win_condition = game::WinCondition::AllPiecesCaptured;
-        }
 
         // Precompute effective promotion ranks and dynamic back ranks once per
         // game from promotion_ranks. For standard chess this yields promo
