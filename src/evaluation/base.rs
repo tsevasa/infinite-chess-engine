@@ -944,7 +944,7 @@ pub fn evaluate_pieces(
 }
 
 pub fn evaluate_rook(
-    game: &GameState,
+    _game: &GameState,
     x: i64,
     y: i64,
     color: PlayerColor,

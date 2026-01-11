@@ -79,6 +79,24 @@ pub const MATE_VALUE: i32 = 900_000;
 pub const MATE_SCORE: i32 = 800_000;
 pub const THINK_TIME_MS: u128 = 3000; // 3 seconds per move (default, may be overridden by caller)
 
+/// Returns true if the value is a winning mate score (mate for us)
+#[inline(always)]
+pub const fn is_win(value: i32) -> bool {
+    value > MATE_SCORE
+}
+
+/// Returns true if the value is a losing mate score (we're getting mated)
+#[inline(always)]
+pub const fn is_loss(value: i32) -> bool {
+    value < -MATE_SCORE
+}
+
+/// Returns true if the value is a decisive (mate) score
+#[inline(always)]
+pub const fn is_decisive(value: i32) -> bool {
+    value.abs() > MATE_SCORE
+}
+
 // Correction History constants (adapted for Infinite Chess)
 // Size of correction history tables (power of 2 for fast masking)
 pub const CORRHIST_SIZE: usize = 16384; // 16K entries per color (for piece/material hashes)
@@ -2123,14 +2141,16 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             tt_depth = d;
         }
         // In non-PV nodes, use TT cutoff if valid score returned
-        // "graph history interaction" workaround:
+        // Adding cutNode check for node type consistency
         // - Don't produce TT cutoffs when rule50 is high (>= 96)
-        // - Don't produce TT cutoffs when position has repetition history
-        // - Don't cutoff on mate scores (they need full verification at each depth)
+        // - Don't cutoff on mate scores (they need full verification)
         let rule_limit = searcher.move_rule_limit as u32;
+        let fails_high = score >= beta;
+        let node_type_matches = (cut_node == fails_high) || depth > 5;
         if !is_pv
             && score != INFINITY + 1
-            && score.abs() < MATE_SCORE
+            && !is_decisive(score)
+            && node_type_matches
             && game.halfmove_clock < rule_limit.saturating_sub(4)
             && game.repetition == 0
         {
@@ -2146,15 +2166,31 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         0
     };
 
-    let (static_eval, raw_eval) = if in_check {
-        // When in check, use a pessimistic value (eval is unreliable in check)
-        let eval = -MATE_VALUE + ply as i32;
-        (eval, eval)
+    let (mut static_eval, raw_eval) = if in_check {
+        // When in check, use previous ply's evaluation (like Stockfish)
+        let prev_eval = if ply >= 2 {
+            searcher.eval_stack[ply - 2]
+        } else {
+            0
+        };
+        (prev_eval, prev_eval)
     } else {
         let raw = evaluate(game);
         let adjusted = searcher.adjusted_eval(game, raw, prev_move_idx);
         (adjusted, raw)
     };
+
+    // Use TT value to improve position evaluation when valid and bound matches
+    if !in_check {
+        if let Some(tt_val) = tt_value {
+            if !is_decisive(tt_val) {
+                // If TT value > eval and has lower bound, or TT value < eval and has upper bound
+                // we can use it as a better position evaluation
+                // Note: TT flags already checked during probe, so we just use the value
+                static_eval = tt_val;
+            }
+        }
+    }
 
     searcher.eval_stack[ply] = static_eval;
 
@@ -2201,7 +2237,8 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
 
         // Reverse futility pruning (static null move)
         // If static eval is much higher than beta, return early
-        if !is_pv && depth < 14 {
+        // Guard: don't prune when beta is a losing mate score or eval is a winning mate score
+        if !is_pv && depth < 14 && !is_loss(beta) && !is_win(static_eval) {
             let futility_mult = 76;
             let futility_margin = futility_mult * depth as i32
                 - if improving {
@@ -2222,7 +2259,8 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
 
         // Null move pruning: give opponent an extra move, if still >= beta, prune
         // Only in cut nodes with non-pawn material (avoid zugzwang)
-        if cut_node && allow_null && depth >= nmp_min_depth() {
+        // Guard: don't prune when beta is a losing mate score (preserve mate finding)
+        if cut_node && allow_null && depth >= nmp_min_depth() && !is_loss(beta) {
             let nmp_margin = static_eval - (18 * depth as i32) + 350;
             if nmp_margin >= beta && game.has_non_pawn_material(game.turn) {
                 let saved_ep = game.en_passant;
@@ -2249,7 +2287,8 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 }
 
                 // If null move score >= beta, we can prune
-                if null_score >= beta {
+                // Guard: don't return mate scores from null move (they're unproven)
+                if null_score >= beta && !is_win(null_score) {
                     return null_score;
                 }
             }
@@ -2270,10 +2309,11 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     // If we have a good enough capture and a reduced search returns a value
     // much above beta, we can prune.
     let prob_cut_beta = beta + 235 - if improving { 63 } else { 0 };
+    // Guard: don't ProbCut when beta is a mate score
     if !is_pv
         && !in_check
         && depth >= 5
-        && beta.abs() < MATE_SCORE
+        && !is_decisive(beta)
         && !tt_value.is_some_and(|v| v < prob_cut_beta)
     {
         let mut prob_cut_depth = (depth as i32 - 4 - (static_eval - beta) / 315).max(0) as usize;
@@ -2348,7 +2388,26 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     ply,
                 });
 
-                return val;
+                // Only return if not decisive, adjust value
+                if !is_decisive(val) {
+                    return val - (prob_cut_beta - beta);
+                }
+            }
+        }
+    }
+
+    // Small ProbCut: if TT entry has a lower bound >= beta + margin, return early
+    // This avoids searching positions where we already know there's a good move
+    {
+        let small_prob_cut_beta = beta + 800;
+        if let Some((tt_flag, tt_depth, tt_score, _)) = searcher.tt.probe_for_singular(hash, ply) {
+            if (tt_flag == TTFlag::LowerBound || tt_flag == TTFlag::Exact)
+                && tt_depth as usize >= depth.saturating_sub(4)
+                && tt_score >= small_prob_cut_beta
+                && !is_decisive(beta)
+                && !is_decisive(tt_score)
+            {
+                return small_prob_cut_beta;
             }
         }
     }
@@ -2371,7 +2430,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 |(tt_flag, tt_depth, tt_score, _)| {
                     if (tt_flag == TTFlag::LowerBound || tt_flag == TTFlag::Exact)
                         && tt_depth as usize >= depth.saturating_sub(3)
-                        && tt_score.abs() < MATE_SCORE
+                        && !is_decisive(tt_score)
                     {
                         Some((tt_score, (depth - 1) / 2)) // (singular_beta_base, singular_depth)
                     } else {
@@ -2400,7 +2459,8 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         let gives_check = StagedMoveGen::move_gives_check_fast(game, &m);
 
         // In-move pruning at shallow depths (not in PV, have material, not losing)
-        if !is_pv && game.has_non_pawn_material(game.turn) && best_score > -MATE_SCORE {
+        // Guard: don't prune when we have a losing mate score (must find escape)
+        if !is_pv && game.has_non_pawn_material(game.turn) && !is_loss(best_score) {
             // Late move pruning: skip quiet moves after seeing enough
             // Threshold: (3 + depth²) / (2 if not improving, else 1)
             let improving_div = if improving { 1 } else { 2 };
@@ -2463,7 +2523,8 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     let no_best = if best_move.is_none() { 161 } else { 0 };
                     let futility_value = static_eval + 42 + no_best + 127 * adj_lmr_depth;
                     if futility_value <= alpha {
-                        if best_score <= futility_value {
+                        // Guard: don't overwrite mate scores with futility value
+                        if best_score <= futility_value && !is_decisive(best_score) {
                             best_score = futility_value;
                         }
                         continue;
@@ -2628,8 +2689,9 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 if se_best < singular_beta - triple_margin && is_pv {
                     extension = 3;
                 }
-            } else if se_best >= beta && !is_pv {
+            } else if se_best >= beta && !is_pv && !is_decisive(se_best) {
                 // Multi-cut: alternatives also beat beta, prune the whole subtree
+                // Guard: don't return mate scores (they need verification)
                 let penalty = (-400 - 100 * depth as i32).max(-4000);
                 let max_tt_hist = 8192;
                 searcher.tt_move_history +=
@@ -2639,7 +2701,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 searcher.prev_move_stack[ply] = prev_entry_backup;
                 searcher.move_history[ply] = move_history_backup;
                 searcher.moved_piece_history[ply] = piece_history_backup;
-                return beta;
+                return se_best;
             } else if tt_value.is_some_and(|v| v >= beta) {
                 // Negative extension: TT move is assumed to fail high but wasn't singular
                 // Reduce depth to favor other moves
@@ -2730,6 +2792,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             // History Leaf Pruning:
             // Only in non-PV, quiet, shallow nodes and after enough moves
             // Exempt checking moves to avoid missing check-fork tactics:
+            // Guard: don't prune when we have a losing mate score
             if !in_check
                 && !is_pv
                 && !is_capture
@@ -2737,7 +2800,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 && !gives_check
                 && depth <= hlp_max_depth()
                 && legal_moves >= hlp_min_moves()
-                && best_score > -MATE_SCORE
+                && !is_loss(best_score)
             {
                 let idx = hash_move_dest(&m);
                 let value = searcher.history[p_type as usize][idx];
@@ -2902,11 +2965,11 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 searcher.pv_length[ply] = child_len + 1;
 
                 // Depth reduction on alpha improvement
-                // Reduce depth for remaining moves after finding a score improvement.
-                // Balanced by hindsight depth adjustments and LMR deeper/shallower.
-                //     if depth > 2 && depth < 14 && score.abs() < MATE_SCORE {
-                //         depth -= 2;
-                //     }
+                // Reduce depth for remaining moves after finding a score improvement
+                // NOTE: Disabled - requires proper conditions to match engine behavior
+                // if depth > 2 && depth < 14 && !is_decisive(score) {
+                //     depth -= 2;
+                // }
             }
         }
 
@@ -3009,6 +3072,12 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         } else {
             return 0; // Stalemate
         }
+    }
+
+    // Adjust best value for fail high cases
+    // Soften the score to prevent returning inflated values from reduced searches
+    if best_score >= beta && !is_decisive(best_score) && !is_decisive(alpha) {
+        best_score = (best_score * depth as i32 + beta) / (depth as i32 + 1);
     }
 
     // Store in TT with correct flag based on original alpha/beta (per Wikipedia pseudocode)
@@ -3135,8 +3204,13 @@ fn quiescence(
     };
 
     if !must_escape {
+        // Stand pat cutoff with adjustment for non-decisive scores
         if stand_pat >= beta {
-            return beta;
+            // Don't adjust mate scores
+            if !is_decisive(stand_pat) {
+                return (stand_pat + beta) / 2;
+            }
+            return stand_pat;
         }
 
         if alpha < stand_pat {
@@ -3180,8 +3254,8 @@ fn quiescence(
     const DELTA_MARGIN: i32 = 200;
 
     for m in &tactical_moves {
-        // Filter: If not in check, apply SEE and delta pruning
-        if !in_check {
+        // Don't prune when we're getting mated - need to search all moves
+        if !in_check && !is_loss(best_score) {
             // See gain for the capture/promotion
             let see_gain = static_exchange_eval(game, m);
 
@@ -3250,6 +3324,11 @@ fn quiescence(
 
     // Swap back move buffer for this ply before returning
     std::mem::swap(&mut searcher.move_buffers[ply], &mut tactical_moves);
+
+    // Adjust score for fail-high, but not for mate scores
+    if !is_decisive(best_score) && best_score > beta {
+        best_score = (best_score + beta) / 2;
+    }
 
     best_score
 }
