@@ -239,6 +239,36 @@ impl PieceType {
         }
     }
 
+    /// Convert piece type from the site's two-letter code
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    pub fn from_site_code(code: &str) -> Self {
+        match code {
+            "VO" => PieceType::Void,
+            "OB" => PieceType::Obstacle,
+            "K" => PieceType::King,
+            "GI" => PieceType::Giraffe,
+            "CA" => PieceType::Camel,
+            "ZE" => PieceType::Zebra,
+            "NR" => PieceType::Knightrider,
+            "AM" => PieceType::Amazon,
+            "Q" => PieceType::Queen,
+            "RQ" => PieceType::RoyalQueen,
+            "HA" => PieceType::Hawk,
+            "CH" => PieceType::Chancellor,
+            "AR" => PieceType::Archbishop,
+            "CE" => PieceType::Centaur,
+            "RC" => PieceType::RoyalCentaur,
+            "RO" => PieceType::Rose,
+            "N" => PieceType::Knight,
+            "GU" => PieceType::Guard,
+            "HU" => PieceType::Huygen,
+            "R" => PieceType::Rook,
+            "B" => PieceType::Bishop,
+            "P" => PieceType::Pawn,
+            _ => PieceType::Void,
+        }
+    }
+
     /// Check if this piece type is a neutral/blocking type (can't be moved by players)
     #[inline]
     pub fn is_neutral_type(&self) -> bool {

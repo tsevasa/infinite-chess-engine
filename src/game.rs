@@ -1,5 +1,10 @@
+#[cfg(any(test, not(target_arch = "wasm32")))]
+use crate::Variant;
+#[cfg(any(test, not(target_arch = "wasm32")))]
+use crate::evaluation::calculate_initial_material;
+
 use crate::board::{Board, Coordinate, Piece, PieceType, PlayerColor};
-use crate::evaluation::{calculate_initial_material, get_piece_value};
+use crate::evaluation::get_piece_value;
 use crate::moves::{
     Move, MoveList, SpatialIndices, get_legal_moves, get_legal_moves_into,
     get_pseudo_legal_moves_for_piece_into, is_square_attacked,
@@ -34,6 +39,27 @@ impl std::str::FromStr for WinCondition {
             "allroyalscaptured" => Ok(WinCondition::AllRoyalsCaptured),
             "allpiecescaptured" => Ok(WinCondition::AllPiecesCaptured),
             _ => Err(()),
+        }
+    }
+}
+
+impl WinCondition {
+    /// Select the most appropriate win condition from a list based on priority.
+    /// Priority: Checkmate > RoyalCapture > AllRoyalsCaptured > AllPiecesCaptured.
+    pub fn select(conditions: &[WinCondition], opponent_has_royal: bool) -> Self {
+        if !opponent_has_royal {
+            return WinCondition::AllPiecesCaptured;
+        }
+        if conditions.contains(&WinCondition::Checkmate) {
+            WinCondition::Checkmate
+        } else if conditions.contains(&WinCondition::RoyalCapture) {
+            WinCondition::RoyalCapture
+        } else if conditions.contains(&WinCondition::AllRoyalsCaptured) {
+            WinCondition::AllRoyalsCaptured
+        } else if conditions.contains(&WinCondition::AllPiecesCaptured) {
+            WinCondition::AllPiecesCaptured
+        } else {
+            WinCondition::Checkmate // Default
         }
     }
 }
@@ -3191,6 +3217,7 @@ impl GameState {
         nodes
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn setup_position_from_icn(&mut self, position_icn: &str) {
         self.board = Board::new();
         self.special_rights.clear();
@@ -3200,92 +3227,234 @@ impl GameState {
         self.fullmove_number = 1;
         self.material_score = 0;
 
-        // Parse ICN format: "PieceType,x,y|PieceType,x,y|..."
-        // Example: "P1,2|r2,3|K4,5" where:
-        // - P = white pawn at (1,2)
-        // - r = black rook at (2,3)
-        // - K = white king at (4,5)
-        // Optional + after piece indicates special rights: "P1,2+|r2,3+"
-        for piece_str in position_icn.split('|') {
-            if piece_str.is_empty() {
+        // Step 1: Strip [...] metadata tags
+        let content = if let Some(idx) = position_icn.rfind(']') {
+            &position_icn[idx + 1..]
+        } else {
+            position_icn
+        };
+
+        let content = content.trim();
+        if content.is_empty() {
+            return;
+        }
+
+        // Tokenize by whitespace
+        let tokens: Vec<&str> = content.split_whitespace().collect();
+
+        // Handle the case where it's JUST pieces
+        if tokens.len() == 1 {
+            self.parse_icn_pieces(tokens[0]);
+            self.finalize_setup();
+            return;
+        }
+
+        let mut wc_list = Vec::new();
+        let mut pieces_token = None;
+
+        for token in tokens {
+            if token == "-" {
                 continue;
             }
 
-            // Split into piece_info and coordinates: "P1,2" -> ["P1", "2"]
-            let parts: Vec<&str> = piece_str.split(',').collect();
+            // identify token by structure
+            if token == "w" {
+                self.turn = PlayerColor::White;
+            } else if token == "b" {
+                self.turn = PlayerColor::Black;
+            } else if token.contains('/') {
+                // Clocks: halfmove/limit
+                let parts: Vec<&str> = token.split('/').collect();
+                if let Some(hm_str) = parts.first() {
+                    self.halfmove_clock = hm_str.parse().unwrap_or(0);
+                }
+                if parts.len() > 1 {
+                    self.game_rules.move_rule_limit = parts[1].parse::<u32>().ok();
+                }
+            } else if token.starts_with('(') && token.ends_with(')') {
+                // Promotion Rules: (w_rank;w_pieces|b_rank;b_pieces)
+                let inner = &token[1..token.len() - 1];
+                let sides: Vec<&str> = inner.split('|').collect();
+                let mut promo_types = Vec::new();
+
+                for (idx, side_str) in sides.iter().enumerate() {
+                    let parts: Vec<&str> = side_str.split(';').collect();
+                    if parts.is_empty() {
+                        continue;
+                    }
+
+                    if let Ok(rank) = parts[0].parse::<i64>() {
+                        if idx == 0 {
+                            self.white_promo_rank = rank;
+                        } else {
+                            self.black_promo_rank = rank;
+                        }
+
+                        if self.game_rules.promotion_ranks.is_none() {
+                            self.game_rules.promotion_ranks = Some(PromotionRanks::default());
+                        }
+                        if let Some(ref mut pr) = self.game_rules.promotion_ranks {
+                            if idx == 0 {
+                                pr.white = vec![rank];
+                            } else {
+                                pr.black = vec![rank];
+                            }
+                        }
+                    }
+
+                    if parts.len() > 1 {
+                        let types: Vec<&str> = parts[1].split(',').collect();
+                        for t in &types {
+                            let pt = PieceType::from_site_code(&t.to_uppercase());
+                            if pt != PieceType::Void {
+                                promo_types.push(pt);
+                            }
+                        }
+                        self.game_rules.promotions_allowed =
+                            Some(types.iter().map(|s| s.to_string()).collect());
+                        self.game_rules.promotion_types = Some(promo_types.clone());
+                    }
+                }
+            } else if token.split(',').count() == 4
+                && token
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == ',' || c == '-')
+            {
+                // World Border: left,right,bottom,top
+                let bounds: Vec<&str> = token.split(',').collect();
+                if let (Ok(l), Ok(r), Ok(b), Ok(t)) = (
+                    bounds[0].parse::<i64>(),
+                    bounds[1].parse::<i64>(),
+                    bounds[2].parse::<i64>(),
+                    bounds[3].parse::<i64>(),
+                ) {
+                    crate::moves::set_world_bounds(l, r, b, t);
+                }
+            } else if token.contains('|')
+                || (token.contains(',') && token.chars().any(|c| c.is_ascii_uppercase()))
+            {
+                // Pieces segment typically contains '|' or pieces like 'P1,2' (uppercase P)
+                pieces_token = Some(token);
+            } else if token.contains(',')
+                && token.split(',').count() == 2
+                && !token.chars().any(|c| c.is_ascii_alphabetic())
+            {
+                // En Passant: x,y
+                let parts: Vec<&str> = token.split(',').collect();
+                if let (Ok(x), Ok(y)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) {
+                    let pawn_y = if self.turn == PlayerColor::White {
+                        y - 1
+                    } else {
+                        y + 1
+                    };
+                    self.en_passant = Some(EnPassantState {
+                        square: Coordinate::new(x, y),
+                        pawn_square: Coordinate::new(x, pawn_y),
+                    });
+                }
+            } else if let Ok(val) = token.parse::<u32>() {
+                // Fullmove number
+                self.fullmove_number = val;
+            } else {
+                // Check if it's a win condition list
+                for wc_str in token.split(',') {
+                    if let Ok(wc) = wc_str.parse::<WinCondition>() {
+                        wc_list.push(wc);
+                    }
+                }
+            }
+        }
+
+        // Now parse pieces if found
+        if let Some(p) = pieces_token {
+            self.parse_icn_pieces(p);
+        }
+
+        // Recompute piece counts/lists BEFORE selecting win conditions
+        self.recompute_piece_counts();
+
+        // Finalize win conditions based on piece presence
+        let white_has_royal = self.white_pieces.iter().any(|&(px, py)| {
+            self.board
+                .get_piece(px, py)
+                .map(|p| p.piece_type().is_royal())
+                .unwrap_or(false)
+        });
+        let black_has_royal = self.black_pieces.iter().any(|&(px, py)| {
+            self.board
+                .get_piece(px, py)
+                .map(|p| p.piece_type().is_royal())
+                .unwrap_or(false)
+        });
+
+        self.game_rules.white_win_condition = WinCondition::select(&wc_list, black_has_royal);
+        self.game_rules.black_win_condition = WinCondition::select(&wc_list, white_has_royal);
+
+        self.finalize_setup();
+    }
+
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    fn parse_icn_pieces(&mut self, piece_segment: &str) {
+        for piece_def in piece_segment.split('|') {
+            if piece_def.is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = piece_def.split(',').collect();
             if parts.len() != 2 {
-                continue; // Skip invalid pieces
-            }
-
-            let (piece_info, y_str) = (parts[0], parts[1]);
-
-            // Extract piece type and x coordinate from piece_info: "P1" -> ('P', '1')
-            let mut chars = piece_info.chars();
-            let piece_char = chars.next();
-            let x_str: String = chars.collect();
-
-            if piece_char.is_none() {
                 continue;
             }
+
+            let piece_info_raw = parts[0];
+            let y_raw = parts[1];
+
+            let split_idx = piece_info_raw
+                .find(|c: char| c.is_ascii_digit() || c == '-')
+                .unwrap_or(piece_info_raw.len());
+            let (code_str, x_str_raw) = piece_info_raw.split_at(split_idx);
+
+            if code_str.is_empty() {
+                continue;
+            }
+
+            let mut has_special_rights = false;
+            let x_str = if x_str_raw.ends_with('+') {
+                has_special_rights = true;
+                &x_str_raw[..x_str_raw.len() - 1]
+            } else {
+                x_str_raw
+            };
+
+            let y_str = if y_raw.ends_with('+') {
+                has_special_rights = true;
+                &y_raw[..y_raw.len() - 1]
+            } else {
+                y_raw
+            };
 
             let x: i64 = x_str.parse().unwrap_or(0);
             let y: i64 = y_str.parse().unwrap_or(0);
 
-            // Extract piece type and check for special rights
-            let piece_char = piece_char.unwrap();
-            let (actual_piece_char, has_special_rights) = if x_str.ends_with('+') {
-                // Format like "P1+,2" - special rights indicated
-                let _clean_x = &x_str[..x_str.len() - 1]; // Prefix with underscore to indicate unused
-                (piece_char, true)
-            } else {
-                (piece_char, false)
-            };
-
-            let is_white = actual_piece_char.is_uppercase();
-            let piece_type = match actual_piece_char.to_ascii_lowercase() {
-                'k' => PieceType::King,
-                'q' => PieceType::Queen,
-                'r' => PieceType::Rook,
-                'b' => PieceType::Bishop,
-                'n' => PieceType::Knight,
-                'p' => PieceType::Pawn,
-                // Extended pieces for variants
-                'a' => PieceType::Amazon,
-                'c' => PieceType::Chancellor,
-                'h' => PieceType::Archbishop,
-                'v' => PieceType::Void,
-                'x' => PieceType::Obstacle,
-                'g' => PieceType::Giraffe,
-                'l' => PieceType::Camel, // 'l' for camel ( avoid 'c' conflict with chancellor
-                'z' => PieceType::Zebra,
-                'm' => PieceType::Knightrider, // 'm' for knightrider
-                _ => continue,                 // Skip unknown piece types
-            };
-
+            let first_char = code_str.chars().next().unwrap();
+            let is_white = first_char.is_uppercase();
             let color = if is_white {
                 PlayerColor::White
             } else {
                 PlayerColor::Black
             };
-            let piece = Piece::new(piece_type, color);
 
-            // Use the cleaned x coordinate if we had special rights
-            let final_x = if has_special_rights && x_str.ends_with('+') {
-                let clean_x = &x_str[..x_str.len() - 1];
-                clean_x.parse().unwrap_or(x)
-            } else {
-                x
-            };
+            let piece_type = PieceType::from_site_code(&code_str.to_uppercase());
 
-            self.board.set_piece(final_x, y, piece);
+            self.board.set_piece(x, y, Piece::new(piece_type, color));
 
-            // Add special rights if indicated by +
             if has_special_rights {
-                // coord_key was unused, removing the format string since we only need the coordinate
-                self.special_rights.insert(Coordinate::new(final_x, y));
+                self.special_rights.insert(Coordinate::new(x, y));
             }
         }
+    }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    fn finalize_setup(&mut self) {
         // Calculate initial material
         self.material_score = calculate_initial_material(&self.board);
 
@@ -3296,92 +3465,14 @@ impl GameState {
         self.recompute_hash();
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    pub fn setup_variant(&mut self, variant: Variant) {
+        self.setup_position_from_icn(variant.starting_icn());
+    }
+
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn setup_standard_chess(&mut self) {
-        self.board = Board::new();
-        self.special_rights.clear();
-        self.en_passant = None;
-        self.turn = PlayerColor::White;
-        self.halfmove_clock = 0;
-        self.fullmove_number = 1;
-        self.material_score = 0;
-
-        // White Pieces
-        self.board
-            .set_piece(1, 1, Piece::new(PieceType::Rook, PlayerColor::White));
-        self.board
-            .set_piece(2, 1, Piece::new(PieceType::Knight, PlayerColor::White));
-        self.board
-            .set_piece(3, 1, Piece::new(PieceType::Bishop, PlayerColor::White));
-        self.board
-            .set_piece(4, 1, Piece::new(PieceType::Queen, PlayerColor::White));
-        self.board
-            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
-        self.board
-            .set_piece(6, 1, Piece::new(PieceType::Bishop, PlayerColor::White));
-        self.board
-            .set_piece(7, 1, Piece::new(PieceType::Knight, PlayerColor::White));
-        self.board
-            .set_piece(8, 1, Piece::new(PieceType::Rook, PlayerColor::White));
-
-        for x in 1..=8 {
-            self.board
-                .set_piece(x, 2, Piece::new(PieceType::Pawn, PlayerColor::White));
-        }
-
-        // Black Pieces
-        self.board
-            .set_piece(1, 8, Piece::new(PieceType::Rook, PlayerColor::Black));
-        self.board
-            .set_piece(2, 8, Piece::new(PieceType::Knight, PlayerColor::Black));
-        self.board
-            .set_piece(3, 8, Piece::new(PieceType::Bishop, PlayerColor::Black));
-        self.board
-            .set_piece(4, 8, Piece::new(PieceType::Queen, PlayerColor::Black));
-        self.board
-            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
-        self.board
-            .set_piece(6, 8, Piece::new(PieceType::Bishop, PlayerColor::Black));
-        self.board
-            .set_piece(7, 8, Piece::new(PieceType::Knight, PlayerColor::Black));
-        self.board
-            .set_piece(8, 8, Piece::new(PieceType::Rook, PlayerColor::Black));
-
-        for x in 1..=8 {
-            self.board
-                .set_piece(x, 7, Piece::new(PieceType::Pawn, PlayerColor::Black));
-        }
-
-        // Special Rights - Kings, Rooks (castling) and Pawns (double move)
-        self.special_rights.insert(Coordinate::new(1, 1)); // Rook
-        self.special_rights.insert(Coordinate::new(5, 1)); // King
-        self.special_rights.insert(Coordinate::new(8, 1)); // Rook
-
-        self.special_rights.insert(Coordinate::new(1, 8)); // Rook
-        self.special_rights.insert(Coordinate::new(5, 8)); // King
-        self.special_rights.insert(Coordinate::new(8, 8)); // Rook
-
-        // Pawn double-move rights
-        for x in 1..=8 {
-            self.special_rights.insert(Coordinate::new(x, 2)); // White pawns
-            self.special_rights.insert(Coordinate::new(x, 7)); // Black pawns
-        }
-
-        // Explicitly set standard promotion ranks (8 for white, 1 for black)
-        self.game_rules.promotion_ranks = Some(PromotionRanks {
-            white: vec![8],
-            black: vec![1],
-        });
-        self.white_promo_rank = 8;
-        self.black_promo_rank = 1;
-
-        // Calculate initial material
-        self.material_score = calculate_initial_material(&self.board);
-
-        // Rebuild piece lists and counts
-        self.recompute_piece_counts();
-
-        // Compute initial hash
-        self.recompute_hash();
+        self.setup_variant(Variant::Classical);
     }
 }
 
@@ -3400,6 +3491,49 @@ mod tests {
         game.recompute_piece_counts();
         game.recompute_hash();
         game
+    }
+
+    #[test]
+    fn test_parse_icn_full() {
+        let icn = "[Event \"Complex Game\"] w 10,3 5/100 1 (8;am,q|1;am,q) -100,500,-35,100 checkmate,royalcapture,allroyalscaptured,allpiecescaptured K5,1+|k5,8+";
+
+        let mut game = GameState::new();
+        game.setup_position_from_icn(icn);
+
+        // Check header info
+        assert_eq!(game.turn, PlayerColor::White);
+        assert_eq!(game.halfmove_clock, 5);
+        assert_eq!(game.game_rules.move_rule_limit, Some(100));
+        assert_eq!(game.fullmove_number, 1);
+        assert_eq!(game.white_promo_rank, 8);
+        assert_eq!(game.black_promo_rank, 1);
+
+        // En passant square (10,3). White turn, so Black pawn just moved 10,4->10,2.
+        // Pawn being captured is at 10,2.
+        let ep = game.en_passant.unwrap();
+        assert_eq!(ep.square, Coordinate::new(10, 3));
+        assert_eq!(ep.pawn_square, Coordinate::new(10, 2));
+
+        // Check world bounds
+        let (min_x, max_x, min_y, max_y) = crate::moves::get_coord_bounds();
+        assert_eq!(min_x, -100);
+        assert_eq!(max_x, 500);
+        assert_eq!(min_y, -35);
+        assert_eq!(max_y, 100);
+
+        // Check win conditions
+        // Priority: Checkmate
+        assert_eq!(game.game_rules.white_win_condition, WinCondition::Checkmate);
+        assert_eq!(game.game_rules.black_win_condition, WinCondition::Checkmate);
+
+        // Check allowed promotions
+        let allowed = game.game_rules.promotions_allowed.as_ref().unwrap();
+        assert!(allowed.contains(&"am".to_string()));
+        assert!(allowed.contains(&"q".to_string()));
+
+        // Check pieces
+        let k = game.board.get_piece(5, 1).unwrap();
+        assert_eq!(k.piece_type(), PieceType::King);
     }
 
     // ======================== 50-Move Rule Tests ========================
@@ -4004,6 +4138,45 @@ mod tests {
         // Check promotion ranks set
         assert_eq!(game.white_promo_rank, 8);
         assert_eq!(game.black_promo_rank, 1);
+    }
+
+    #[test]
+    fn test_all_variants_setup() {
+        let variants = [
+            Variant::Classical,
+            Variant::ConfinedClassical,
+            Variant::ClassicalPlus,
+            Variant::CoaIP,
+            Variant::CoaIPHO,
+            Variant::CoaIPRO,
+            Variant::CoaIPNO,
+            Variant::Palace,
+            Variant::Pawndard,
+            Variant::Core,
+            Variant::Standarch,
+            Variant::SpaceClassic,
+            Variant::Space,
+            Variant::Abundance,
+            Variant::PawnHorde,
+            Variant::Knightline,
+            Variant::Obstocean,
+            Variant::Chess,
+        ];
+
+        for &v in &variants {
+            let mut game = GameState::new();
+            game.setup_variant(v);
+            assert!(
+                game.white_piece_count > 0,
+                "Variant {:?} should have white pieces",
+                v
+            );
+            assert!(
+                game.black_piece_count > 0,
+                "Variant {:?} should have black pieces",
+                v
+            );
+        }
     }
 
     #[test]
