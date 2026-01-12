@@ -1249,6 +1249,13 @@ downloadGamesTxtBtn.addEventListener('click', downloadGames);
 downloadGamesJsonBtn.addEventListener('click', downloadGamesJson);
 sprtVariantsEl.addEventListener('change', updateSelectedVariants);
 
+window.addEventListener('beforeunload', (e) => {
+    if (sprtRunning) {
+        e.preventDefault();
+        e.returnValue = ''; // Required for some browsers
+    }
+});
+
 // Initialize variant loading
 loadVariants();
 
