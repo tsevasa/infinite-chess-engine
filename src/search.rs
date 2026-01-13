@@ -11,7 +11,7 @@ use crate::search::params::{
     nmp_reduction_base, nmp_reduction_div, probcut_depth_sub, probcut_divisor, probcut_improving,
     probcut_margin, probcut_min_depth, razoring_linear, razoring_quad, repetition_penalty,
     rfp_improving_mult, rfp_max_depth, rfp_mult_no_tt, rfp_mult_tt, rfp_worsening_mult,
-    see_capture_hist_div, see_capture_linear, see_quiet_quad, see_winning_threshold,
+    see_capture_hist_div, see_capture_linear, see_quiet_quad,
 };
 use std::cell::RefCell;
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
@@ -167,7 +167,7 @@ pub use shared_tt::{SharedTT, SharedTTFlag};
 mod ordering;
 use ordering::{hash_coord_32, hash_move_dest, hash_move_from, sort_captures, sort_moves_root};
 
-mod movegen;
+pub mod movegen;
 use movegen::StagedMoveGen;
 
 mod see;
@@ -2362,37 +2362,20 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             prob_cut_depth = depth;
         }
 
-        // Generate captures only
-        // specialized capture-only generator
-        let mut captures: MoveList = MoveList::new();
-        let ctx = crate::moves::MoveGenContext {
-            special_rights: &game.special_rights,
-            en_passant: &game.en_passant,
-            game_rules: &game.game_rules,
-            indices: &game.spatial_indices,
-            enemy_king_pos: game.enemy_king_pos(),
-        };
-        crate::moves::get_quiescence_captures(&game.board, game.turn, &ctx, &mut captures);
+        // Use StagedMoveGen for ProbCut (captures with SEE >= threshold)
+        let threshold = prob_cut_beta - static_eval;
+        let mut probcut_gen = StagedMoveGen::new_probcut(tt_move, threshold, searcher, game);
 
-        // Sort captures to try best ones first
-        sort_captures(game, &mut captures);
-
-        for m in &captures {
-            // Apply SEE pruning for the ProbCut move
-            // Threshold: prob_cut_beta - static_eval
-            if static_exchange_eval(game, m) < prob_cut_beta - static_eval {
-                continue;
-            }
-
+        while let Some(m) = probcut_gen.next(game, searcher) {
             // Fast legality check (skips is_move_illegal for non-pinned pieces)
-            let fast_legal = game.is_legal_fast(m, in_check);
+            let fast_legal = game.is_legal_fast(&m, in_check);
             if let Ok(false) = fast_legal {
                 continue;
             }
 
-            let undo = game.make_move(m);
+            let undo = game.make_move(&m);
             if fast_legal.is_err() && game.is_move_illegal() {
-                game.undo_move(m, undo);
+                game.undo_move(&m, undo);
                 continue;
             }
 
@@ -2413,7 +2396,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 });
             }
 
-            game.undo_move(m, undo);
+            game.undo_move(&m, undo);
 
             if searcher.hot.stopped {
                 return 0;
@@ -2426,7 +2409,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     flag: TTFlag::LowerBound,
                     score: val,
                     is_pv: false,
-                    best_move: Some(*m),
+                    best_move: Some(m),
                     ply,
                 });
 
@@ -2458,7 +2441,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     // =========================================================================
     // Staged Move Generation - generate moves in stages for better efficiency
     // =========================================================================
-    let mut movegen = StagedMoveGen::new(tt_move, ply, searcher, game);
+    let mut movegen = StagedMoveGen::new(tt_move, ply, depth as i32, searcher, game);
 
     let mut best_score = -INFINITY;
     let mut best_move: Option<Move> = None;
@@ -2658,7 +2641,11 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             // Create a move generator that skips the TT move
             let mut se_gen = StagedMoveGen::with_exclusion(
                 None, // No TT move hint for this search
-                ply, searcher, game, m, // Exclude the current (TT) move
+                ply,
+                depth as i32,
+                searcher,
+                game,
+                m, // Exclude the current (TT) move
             );
 
             let mut se_best = -INFINITY;

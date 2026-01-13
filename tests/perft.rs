@@ -238,7 +238,7 @@ fn run_search_only_suite() {
     println!("================================================================");
 
     const NUM_RUNS: usize = 5;
-    const MAX_DEPTH: usize = 10;
+    const MAX_DEPTH: usize = 11;
 
     println!(
         "Running {} sequential search tests to depth {}...",

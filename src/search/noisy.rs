@@ -758,7 +758,7 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
         None
     };
 
-    let mut movegen = StagedMoveGen::new(tt_move, ply, searcher, game);
+    let mut movegen = StagedMoveGen::new(tt_move, ply, depth as i32, searcher, game);
 
     let mut best_score = -INFINITY;
     let mut best_move: Option<Move> = None;
@@ -863,7 +863,8 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
             let singular_beta = tt_score - (depth as i32) * 3 + tt_history_adj;
 
             game.undo_move(&m, undo);
-            let mut se_gen = StagedMoveGen::with_exclusion(None, ply, searcher, game, m);
+            let mut se_gen =
+                StagedMoveGen::with_exclusion(None, ply, depth as i32, searcher, game, m);
             let mut se_moves_checked = 0;
             const SE_MAX_MOVES: usize = 6;
             let mut se_extension_found = true;
