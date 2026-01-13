@@ -224,8 +224,6 @@ pub fn evaluate(game: &GameState) -> i32 {
 
     let mut w_pawn_files = 0u8;
     let mut b_pawn_files = 0u8;
-    let mut w_pawn_counts = [0u8; 8];
-    let mut b_pawn_counts = [0u8; 8];
     let mut pawns = Vec::with_capacity(16);
 
     // Tracker for king safety
@@ -258,22 +256,19 @@ pub fn evaluate(game: &GameState) -> i32 {
         game_phase += PHASE_INC[pc_idx];
 
         if pt == PieceType::Pawn {
-            let file_idx = (x - 1).clamp(0, 7) as usize;
             if is_white {
-                w_pawn_files |= 1 << file_idx;
-                w_pawn_counts[file_idx] += 1;
+                w_pawn_files |= 1 << ((x - 1).clamp(0, 7));
             } else {
-                b_pawn_files |= 1 << file_idx;
-                b_pawn_counts[file_idx] += 1;
+                b_pawn_files |= 1 << ((x - 1).clamp(0, 7));
             }
             pawns.push((x, y, is_white));
         } else if pc_idx >= 1 && pc_idx <= 4 {
-            // 3. Mobility
-            let mobility = count_mobility(&game.board, x, y, pt);
+            // 3. Mobility (including capture squares)
+            let mobility = count_mobility(&game.board, x, y, piece);
             mg[color_idx] += mobility * MG_MOBILITY[pc_idx];
             eg[color_idx] += mobility * EG_MOBILITY[pc_idx];
 
-            // 4. King Safety
+            // 4. King Safety contribution
             let target_king = if is_white { &black_king } else { &white_king };
             if (x - target_king.x).abs() <= 3 && (y - target_king.y).abs() <= 3 {
                 if is_white {
@@ -287,49 +282,50 @@ pub fn evaluate(game: &GameState) -> i32 {
         }
     }
 
-    // Pawn Structure (Calculated from collected data)
-    for (x, y, is_white) in pawns {
+    // Pawn Structure (Second Pass on pawns only)
+    for i in 0..pawns.len() {
+        let (x, y, is_white) = pawns[i];
         let color_idx = if is_white { 0 } else { 1 };
-        let file_idx = (x - 1).clamp(0, 7) as usize;
-        let pawn_files = if is_white { w_pawn_files } else { b_pawn_files };
-        let enemy_pawn_files = if is_white { b_pawn_files } else { w_pawn_files };
+        let f = (x - 1).clamp(0, 7) as usize;
+        let files = if is_white { w_pawn_files } else { b_pawn_files };
 
-        // Isolated
-        let left = if file_idx > 0 {
-            pawn_files & (1 << (file_idx - 1))
-        } else {
-            0
-        };
-        let right = if file_idx < 7 {
-            pawn_files & (1 << (file_idx + 1))
-        } else {
-            0
-        };
-        if left == 0 && right == 0 {
+        // 1. Isolated
+        let has_neighbor =
+            (f > 0 && (files & (1 << (f - 1))) != 0) || (f < 7 && (files & (1 << (f + 1))) != 0);
+        if !has_neighbor {
             mg[color_idx] -= MG_ISOLATED_PENALTY;
             eg[color_idx] -= EG_ISOLATED_PENALTY;
         }
 
-        // Doubled
-        if (if is_white {
-            w_pawn_counts[file_idx]
-        } else {
-            b_pawn_counts[file_idx]
-        }) > 1
-        {
+        // 2. Doubled
+        let mut is_doubled = false;
+        for j in 0..pawns.len() {
+            if i != j {
+                let (nx, _, nw) = pawns[j];
+                if nw == is_white && nx == x {
+                    is_doubled = true;
+                    break;
+                }
+            }
+        }
+        if is_doubled {
             mg[color_idx] -= MG_DOUBLED_PENALTY;
             eg[color_idx] -= EG_DOUBLED_PENALTY;
         }
 
-        // Passed
-        let mut mask = 1 << file_idx;
-        if file_idx > 0 {
-            mask |= 1 << (file_idx - 1);
+        // 3. Passed (No enemy pawns on same/adj files AHEAD)
+        let mut is_passed = true;
+        for j in 0..pawns.len() {
+            let (nx, ny, nw) = pawns[j];
+            if nw != is_white && (nx - x).abs() <= 1 {
+                if (is_white && ny > y) || (!is_white && ny < y) {
+                    is_passed = false;
+                    break;
+                }
+            }
         }
-        if file_idx < 7 {
-            mask |= 1 << (file_idx + 1);
-        }
-        if (enemy_pawn_files & mask) == 0 {
+
+        if is_passed {
             let rank = if is_white { y } else { 9 - y };
             let bonus = PASSED_PAWN_BONUS[(rank - 1).clamp(0, 7) as usize];
             mg[color_idx] += bonus / 2;
@@ -337,12 +333,14 @@ pub fn evaluate(game: &GameState) -> i32 {
         }
     }
 
-    // Apply King Safety Penalty
+    // Apply King Safety Penalty (Non-linear)
     if w_king_attackers >= 2 {
-        mg[0] -= (w_king_attackers * w_king_attack_weight / 20) * KING_SAFETY_COEFF;
+        let penalty = (w_king_attackers * w_king_attackers * w_king_attack_weight) / 40;
+        mg[0] -= penalty * KING_SAFETY_COEFF;
     }
     if b_king_attackers >= 2 {
-        mg[1] -= (b_king_attackers * b_king_attack_weight / 20) * KING_SAFETY_COEFF;
+        let penalty = (b_king_attackers * b_king_attackers * b_king_attack_weight) / 40;
+        mg[1] -= penalty * KING_SAFETY_COEFF;
     }
 
     // Perspective relative to current player
@@ -362,8 +360,10 @@ pub fn evaluate(game: &GameState) -> i32 {
     (mg_score * mg_phase + eg_score * eg_phase) / MAX_PHASE
 }
 
-fn count_mobility(board: &crate::board::Board, x: i64, y: i64, pt: PieceType) -> i32 {
+fn count_mobility(board: &crate::board::Board, x: i64, y: i64, piece: crate::board::Piece) -> i32 {
     let mut count = 0;
+    let pt = piece.piece_type();
+    let our_color = piece.color();
     let dirs = match pt {
         PieceType::Knight => vec![
             (2, 1),
@@ -396,7 +396,10 @@ fn count_mobility(board: &crate::board::Board, x: i64, y: i64, pt: PieceType) ->
         let mut nx = x + dx;
         let mut ny = y + dy;
         while nx >= 1 && nx <= 8 && ny >= 1 && ny <= 8 {
-            if board.is_occupied(nx, ny) {
+            if let Some(p) = board.get_piece(nx, ny) {
+                if p.color() != our_color && p.color() != PlayerColor::Neutral {
+                    count += 1; // Count capture square
+                }
                 break;
             }
             count += 1;
