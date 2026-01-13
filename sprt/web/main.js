@@ -69,7 +69,7 @@ let selectedVariants = [];
 let variantQueue = [];
 let currentVariantIndex = 0;
 
-// SPRT configuration (mirrors sprt.js)
+// SPRT configuration
 const CONFIG = {
     elo0: -5,
     elo1: 5,
@@ -78,13 +78,14 @@ const CONFIG = {
     boundsPreset: 'all',
     boundsMode: 'gainer',
     timeControl: '10+0.1',
+    tcMode: 'smart_mix',
     maxGames: 1000,
     minGames: 500,
-    maxMoves: 200,
+    maxMoves: 300,
     concurrency: navigator.hardwareConcurrency || 1,
-    materialThreshold: 0,
+    materialThreshold: 2000,
 
-    searchNoise: 7,
+    searchNoise: 50,
 };
 
 const MAX_CONCURRENCY_STORAGE_KEY = 'sprtMaxSafeConcurrency';
@@ -565,18 +566,14 @@ function getTcParams(mode, valStr, pairIndex) {
     if (mode === 'smart_mix') {
         // Deterministic pseudo-random based on pairIndex so pairs match
         const r = (pairIndex * 137 + 13) % 100;
-        if (r < 40) { // 40% Standard
-            const opts = ['10+0.1', '5+0.05', '1+0.02', '3+0.03', '60+0.5'];
+        if (r < 75) { // 75% Standard
+            const opts = ['10+0.1', '5+0.05', '3+0.03'];
             const pick = opts[pairIndex % opts.length];
             return getTcParams('standard', pick, pairIndex);
-        } else if (r < 70) { // 30% Fixed Time
-            const opts = ['0.1', '0.25', '0.5', '1.0', '2.0'];
+        } else { // 25% Fixed Time
+            const opts = ['0.1', '0.25', '0.5'];
             const pick = opts[pairIndex % opts.length];
             return getTcParams('fixed_time', pick, pairIndex);
-        } else { // 30% Fixed Depth
-            const opts = ['4', '5', '6', '7', '8'];
-            const pick = opts[pairIndex % opts.length];
-            return getTcParams('fixed_depth', pick, pairIndex);
         }
     }
 
@@ -1248,6 +1245,26 @@ downloadLogsBtn.addEventListener('click', downloadLogs);
 downloadGamesTxtBtn.addEventListener('click', downloadGames);
 downloadGamesJsonBtn.addEventListener('click', downloadGamesJson);
 sprtVariantsEl.addEventListener('change', updateSelectedVariants);
+sprtTcMode.addEventListener('change', updateTcUi);
+
+function updateTcUi() {
+    const mode = sprtTcMode.value;
+    if (mode === 'smart_mix') {
+        sprtTimeControlEl.value = 'Smart Mix';
+        sprtTimeControlEl.disabled = true;
+    } else {
+        sprtTimeControlEl.disabled = false;
+        // If switching away from Smart Mix, restore a logical default if the field still says "Smart Mix"
+        if (sprtTimeControlEl.value === 'Smart Mix') {
+            if (mode === 'fixed_time') sprtTimeControlEl.value = '1.0';
+            else if (mode === 'fixed_depth') sprtTimeControlEl.value = '6';
+            else sprtTimeControlEl.value = '10+0.1';
+        }
+    }
+}
+
+// Initialize UI state
+updateTcUi();
 
 window.addEventListener('beforeunload', (e) => {
     if (sprtRunning) {

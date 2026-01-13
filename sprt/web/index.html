@@ -382,10 +382,10 @@
           <div class="form-group">
             <label>TC Mode</label>
             <select id="sprtTcMode">
+              <option value="smart_mix">Smart Mix (Randomized)</option>
               <option value="standard">Standard (Base+Inc)</option>
               <option value="fixed_time">Fixed Time/Move</option>
               <option value="fixed_depth">Fixed Depth</option>
-              <option value="smart_mix">Smart Mix (Randomized)</option>
             </select>
           </div>
 
@@ -411,16 +411,16 @@
 
           <div class="form-group">
             <label>Max Moves per Game</label>
-            <input type="number" id="sprtMaxMoves" value="200" min="10" max="1000" />
+            <input type="number" id="sprtMaxMoves" value="300" min="10" max="1000" />
           </div>
 
           <div class="form-group">
             <label for="sprtMaterialAdjudication">Material Adjudication (cp):</label>
-            <input type="number" id="sprtMaterialAdjudication" value="1500" min="0" step="100" />
+            <input type="number" id="sprtMaterialAdjudication" value="2000" min="0" step="100" />
           </div>
           <div class="form-group">
             <label for="sprtSearchNoise">Search Noise (cp):</label>
-            <input type="number" id="sprtSearchNoise" value="25" min="0" step="1"
+            <input type="number" id="sprtSearchNoise" value="50" min="0" step="1"
               title="Randomness amplitude for first 4 ply" />
           </div>
           <div class="form-group" style="grid-column: 1 / -1">
