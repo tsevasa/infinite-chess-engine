@@ -46,6 +46,7 @@ pub struct SlidingMoveContext<'a> {
     pub directions: &'a [(i64, i64)],
     pub indices: &'a SpatialIndices,
     pub enemy_king_pos: Option<&'a Coordinate>,
+    pub visited_targets: Option<&'a std::cell::RefCell<Vec<(Coordinate, u8)>>>,
 }
 
 /// Update world borders from JS playableRegion (left, right, bottom, top).
@@ -827,6 +828,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
@@ -840,11 +842,13 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
         }
         PieceType::Queen | PieceType::RoyalQueen => {
+            let visited = std::cell::RefCell::new(Vec::with_capacity(16));
             generate_sliding_moves_into(
                 &SlidingMoveContext {
                     board,
@@ -853,6 +857,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -864,6 +869,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -878,6 +884,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
@@ -892,12 +899,14 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
         }
         PieceType::Amazon => {
             generate_leaper_moves_into(board, from, piece, 1, 2, MoveGenType::All, out);
+            let visited = std::cell::RefCell::new(Vec::with_capacity(16));
             generate_sliding_moves_into(
                 &SlidingMoveContext {
                     board,
@@ -906,6 +915,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -917,6 +927,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -1601,6 +1612,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
@@ -1614,11 +1626,13 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
         }
         PieceType::Queen | PieceType::RoyalQueen => {
+            let visited = std::cell::RefCell::new(Vec::with_capacity(16));
             generate_sliding_quiets_into(
                 &SlidingMoveContext {
                     board,
@@ -1627,6 +1641,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -1638,6 +1653,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -1652,6 +1668,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
@@ -1666,12 +1683,14 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
         }
         PieceType::Amazon => {
             generate_leaper_moves_into(board, from, piece, 1, 2, MoveGenType::Quiets, out);
+            let visited = std::cell::RefCell::new(Vec::with_capacity(16));
             generate_sliding_quiets_into(
                 &SlidingMoveContext {
                     board,
@@ -1680,6 +1699,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -1691,6 +1711,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -1969,6 +1990,7 @@ fn find_cross_ray_targets_into(
     dir_y: i64,
     dist_counts: &mut FxHashMap<i64, u8>,
     royal_dists: &mut FxHashSet<i64>,
+    mut visited_targets: Option<&mut Vec<(Coordinate, u8)>>,
 ) {
     let board = ctx.board;
     let from = ctx.from;
@@ -2049,6 +2071,32 @@ fn find_cross_ray_targets_into(
                                 })
                                 .filter(|&(ny, _)| ny == py)
                         {
+                            // Check visited targets (Vertical alignment = 1)
+                            if !is_enemy {
+                                if let Some(visited) = visited_targets.as_deref_mut() {
+                                    let target_coord = Coordinate::new(px, py);
+                                    let mut found = false;
+                                    let mut pruned = false;
+                                    for (c, m) in visited.iter_mut() {
+                                        if *c == target_coord {
+                                            if *m & 1 != 0 {
+                                                pruned = true;
+                                            } else {
+                                                *m |= 1;
+                                            }
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    if pruned {
+                                        continue;
+                                    }
+                                    if !found {
+                                        visited.push((target_coord, 1));
+                                    }
+                                }
+                            }
+
                             // Count this piece at distance d and wiggle distances
                             add_dist(dist_counts, d, max_dist);
                             if is_royal {
@@ -2084,6 +2132,32 @@ fn find_cross_ray_targets_into(
                                 })
                                 .filter(|&(nx, _)| nx == px)
                         {
+                            // Check visited targets (Horizontal alignment = 2)
+                            if !is_enemy {
+                                if let Some(visited) = visited_targets.as_deref_mut() {
+                                    let target_coord = Coordinate::new(px, py);
+                                    let mut found = false;
+                                    let mut pruned = false;
+                                    for (c, m) in visited.iter_mut() {
+                                        if *c == target_coord {
+                                            if *m & 2 != 0 {
+                                                pruned = true;
+                                            } else {
+                                                *m |= 2;
+                                            }
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    if pruned {
+                                        continue;
+                                    }
+                                    if !found {
+                                        visited.push((target_coord, 2));
+                                    }
+                                }
+                            }
+
                             add_dist(dist_counts, d, max_dist);
                             if is_royal {
                                 royal_dists.insert(d);
@@ -2439,6 +2513,9 @@ fn generate_sliding_moves_impl(
                 }
 
                 // 2. Cross-Ray pieces
+                // Borrow the visited map if available
+                let mut visited_borrow = ctx.visited_targets.as_ref().map(|rc| rc.borrow_mut());
+
                 let cr_ctx = CrossRayContext {
                     board,
                     from,
@@ -2455,6 +2532,7 @@ fn generate_sliding_moves_impl(
                     dir_y,
                     &mut dist_counts,
                     &mut royal_dists,
+                    visited_borrow.as_deref_mut(),
                 );
 
                 // 3. Check targets (O(1))
@@ -2522,7 +2600,6 @@ fn generate_sliding_moves_impl(
                         shared_targets.push(d);
                     }
                 }
-                // Also always add direct capture distance if it's an enemy
                 if closest_dist < i64::MAX && closest_is_enemy {
                     shared_targets.push(closest_dist);
                 }
@@ -3523,6 +3600,7 @@ mod tests {
                 directions: ortho,
                 indices: &indices,
                 enemy_king_pos: None,
+                visited_targets: None,
             },
             &mut moves,
         );
@@ -3551,6 +3629,7 @@ mod tests {
                 directions: diag,
                 indices: &indices,
                 enemy_king_pos: None,
+                visited_targets: None,
             },
             &mut moves,
         );
