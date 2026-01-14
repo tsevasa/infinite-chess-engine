@@ -39,7 +39,7 @@ fn apply_noise(base: i32, game: &GameState, noise_amp: i32) -> i32 {
         return base;
     }
 
-    let hash = TranspositionTable::generate_hash(game);
+    let hash = game.hash;
     let seed = NOISE_SEED.with(|c| *c.borrow());
     let mut x = hash ^ seed;
     x ^= x << 13;
@@ -89,6 +89,9 @@ pub fn get_best_move_with_noise(
             .game_rules
             .move_rule_limit
             .map_or(i32::MAX, |v| v as i32);
+
+        // Ensure TT is initialized
+        super::GLOBAL_TT.get_or_init(|| super::TranspositionTable::new(16));
 
         let result = search_with_searcher_noisy(searcher, game, max_depth, noise_amp);
         let stats = super::build_search_stats(searcher);
@@ -275,7 +278,7 @@ fn negamax_root_noisy(
     let alpha_orig = alpha;
     searcher.pv_length[0] = 0;
 
-    let hash = TranspositionTable::generate_hash(game);
+    let hash = game.hash;
     let mut tt_move: Option<Move> = None;
 
     let rule50_count = game.halfmove_clock;
@@ -502,7 +505,7 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
         0
     };
 
-    let hash = TranspositionTable::generate_hash(game);
+    let hash = game.hash;
     let mut tt_move: Option<Move> = None;
     let mut tt_value: Option<i32> = None;
 
@@ -764,8 +767,10 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
 
     let se_conditions = if depth >= 6 && !in_check {
         tt_move.as_ref().and_then(|_| {
-            searcher.tt.probe_for_singular(hash, ply).and_then(
-                |(tt_flag, tt_depth, tt_score, _, _, _)| {
+            super::GLOBAL_TT
+                .get()
+                .and_then(|tt| tt.probe_for_singular(hash, ply))
+                .and_then(|(tt_flag, tt_depth, tt_score, _, _, _)| {
                     let depth_val = tt_depth as usize;
                     if (tt_flag == TTFlag::LowerBound || tt_flag == TTFlag::Exact)
                         && depth_val >= depth.saturating_sub(3)
@@ -775,8 +780,7 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
                     } else {
                         None
                     }
-                },
-            )
+                })
         })
     } else {
         None

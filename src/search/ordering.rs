@@ -161,13 +161,32 @@ pub fn sort_moves(
 }
 
 /// Sort moves at root - always full sort since we examine all moves
+/// For Lazy SMP, helper threads (thread_id > 0) get slight scoring variation
+/// to explore different move orderings and maximize search diversity.
 pub fn sort_moves_root(
     searcher: &Searcher,
     game: &GameState,
     moves: &mut MoveList,
     tt_move: &Option<Move>,
 ) {
-    sort_moves(searcher, game, moves, 0, tt_move);
+    let thread_id = searcher.thread_id;
+
+    if thread_id == 0 {
+        // Main thread: standard sorting
+        sort_moves(searcher, game, moves, 0, tt_move);
+    } else {
+        // Helper threads: add variation to move scores based on thread_id
+        // This makes different threads explore different move orderings
+        // while still respecting TT move priority
+        moves.sort_by_cached_key(|m| {
+            let base_score = score_move(searcher, game, m, 0, tt_move);
+            // Add pseudo-random variation based on thread_id and move hash
+            // The variation is small so TT moves and winning captures still stay on top
+            let move_hash = hash_move_dest(m) ^ hash_move_from(m);
+            let variation = ((move_hash.wrapping_mul(thread_id)) % 50) as i32;
+            -(base_score + variation)
+        });
+    }
 }
 
 /// Fast capture sorting using MVV-LVA only (no SEE for qsearch captures)

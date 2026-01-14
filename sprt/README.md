@@ -21,12 +21,13 @@ SPRT is a statistical test that determines whether a new engine version is stron
 
 ### 1. Build Your Baseline
 
-Before making changes, save the current engine as your baseline:
-
 ```bash
 # From the engine root directory
 wasm-pack build --target web --out-dir pkg-old
 ```
+
+> [!TIP]
+> If you want to test multithreaded performance (Lazy SMP), build with: `node build_mt.js`.
 
 ### 2. Make Your Changes
 
@@ -36,11 +37,15 @@ Edit the code and save.
 
 ```bash
 cd sprt
+# For single-threaded testing:
 npm run dev
+
+# For multi-threaded testing (Lazy SMP):
+node sprt.js --mt
 ```
 
 This will:
-- Build your modified engine → `sprt/web/pkg-new`
+- Build your modified engine → `sprt/web/pkg-new` (with threads if --mt is used)
 - Copy baseline → `sprt/web/pkg-old`
 - Start a local server at `http://localhost:3000`
 

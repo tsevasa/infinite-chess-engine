@@ -37,7 +37,7 @@ pub struct ProbeContext {
 pub struct StoreContext {
     pub hash: u64,
     pub depth: usize,
-    pub flag: crate::search::tt::TTFlag,
+    pub flag: TTFlag,
     pub score: i32,
     pub static_eval: i32,
     pub is_pv: bool,
@@ -99,6 +99,12 @@ pub const fn is_loss(value: i32) -> bool {
     value < -MATE_SCORE
 }
 
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+
+/// Global stop flag for all search threads.
+pub(crate) static GLOBAL_STOP: AtomicBool = AtomicBool::new(false);
+
 #[inline(always)]
 pub const fn is_decisive(value: i32) -> bool {
     value.abs() > MATE_SCORE
@@ -144,16 +150,16 @@ pub enum NodeType {
 }
 
 pub mod params;
-mod tt;
-pub use tt::{TTEntry, TTFlag, TTProbeParams, TTStoreParams, TranspositionTable};
+pub mod tt_defs;
+pub use tt_defs::{TTFlag, TTProbeParams, TTStoreParams};
 
-// Shared TT for Lazy SMP - uses SharedArrayBuffer from JavaScript
+mod tt;
+use tt::LocalTranspositionTable;
+
 #[cfg(feature = "multithreading")]
 mod shared_tt;
-#[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-pub use shared_tt::SharedTTView;
 #[cfg(feature = "multithreading")]
-pub use shared_tt::{SharedTT, SharedTTFlag};
+use shared_tt::SharedTranspositionTable;
 
 mod ordering;
 use ordering::{hash_coord_32, hash_move_dest, hash_move_from, sort_captures, sort_moves_root};
@@ -174,163 +180,184 @@ pub use zobrist::{
 mod noisy;
 pub use noisy::get_best_move_with_noise;
 
-// Shared work queue for root move splitting (DTS-style parallelism)
-#[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-mod work_queue;
-#[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-pub use work_queue::{NO_MORE_MOVES, SharedWorkQueue, WORK_QUEUE_SIZE_WORDS};
-
 // ============================================================================
-// Shared TT Global State (for Lazy SMP with SharedArrayBuffer)
+// TT Probe/Store (Dispatch wrapper)
 // ============================================================================
 
-#[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-thread_local! {
-    static SHARED_TT_STATE: RefCell<Option<(*mut u64, usize)>> = RefCell::new(None);
-    static SHARED_WORK_QUEUE_STATE: RefCell<Option<(*mut u64, usize)>> = RefCell::new(None);
+static LOCAL_TT: OnceLock<LocalTranspositionTable> = OnceLock::new();
+#[cfg(feature = "multithreading")]
+static SHARED_TT: OnceLock<SharedTranspositionTable> = OnceLock::new();
+
+/// Flag to enable shared TT usage.
+/// Set to true when parallel search is active.
+#[cfg(feature = "multithreading")]
+pub(crate) static USE_SHARED_TT: AtomicBool = AtomicBool::new(false);
+
+/// Helper struct to satisfy closure syntax in get_or_init
+pub struct TranspositionTable;
+impl TranspositionTable {
+    pub fn new(_: usize) -> Self {
+        Self
+    }
 }
 
-/// Set the shared TT pointer (called from lib.rs WASM binding)
-#[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-pub fn set_shared_tt_ptr(ptr: *mut u64, len: usize) {
-    SHARED_TT_STATE.with(|cell| {
-        *cell.borrow_mut() = Some((ptr, len));
-    });
+/// Enum to hold reference to the active TT implementation
+pub enum TranspositionTableRef<'a> {
+    Local(&'a LocalTranspositionTable),
+    #[cfg(feature = "multithreading")]
+    Shared(&'a SharedTranspositionTable),
 }
 
-/// Set the shared work queue pointer (called from lib.rs WASM binding)
-#[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-pub fn set_shared_work_queue_ptr(ptr: *mut u64, len: usize) {
-    SHARED_WORK_QUEUE_STATE.with(|cell| {
-        *cell.borrow_mut() = Some((ptr, len));
-    });
-}
-
-/// Check if a shared TT is configured
-#[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-pub fn has_shared_tt() -> bool {
-    SHARED_TT_STATE.with(|cell| cell.borrow().is_some())
-}
-
-/// Create a SharedTTView from the stored pointer.
-/// Returns None if no shared TT is configured.
-#[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-pub fn create_shared_tt_view() -> Option<SharedTTView> {
-    SHARED_TT_STATE.with(|cell| {
-        if let Some((ptr, len)) = *cell.borrow() {
-            // SAFETY: The pointer comes from JavaScript's SharedArrayBuffer
-            // which is kept alive by JS. The SharedTTView uses atomic operations.
-            Some(unsafe { SharedTTView::new(ptr, len) })
-        } else {
-            None
+impl<'a> TranspositionTableRef<'a> {
+    #[inline]
+    pub fn probe(&self, params: &TTProbeParams) -> Option<(i32, i32, Option<Move>, bool)> {
+        match self {
+            Self::Local(tt) => tt.probe(params),
+            #[cfg(feature = "multithreading")]
+            Self::Shared(tt) => tt.probe(params),
         }
-    })
-}
+    }
 
-/// Create a SharedWorkQueue from the stored pointer.
-/// Returns None if no work queue is configured.
-#[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-pub fn create_work_queue_view() -> Option<SharedWorkQueue> {
-    SHARED_WORK_QUEUE_STATE.with(|cell| {
-        if let Some((ptr, len)) = *cell.borrow() {
-            Some(unsafe { SharedWorkQueue::new(ptr, len) })
-        } else {
-            None
+    #[inline]
+    pub fn probe_for_singular(
+        &self,
+        hash: u64,
+        ply: usize,
+    ) -> Option<(TTFlag, u8, i32, i32, Option<Move>, bool)> {
+        match self {
+            Self::Local(tt) => tt.probe_for_singular(hash, ply),
+            #[cfg(feature = "multithreading")]
+            Self::Shared(tt) => tt.probe_for_singular(hash, ply),
         }
-    })
+    }
+
+    #[inline]
+    pub fn store(&self, params: &TTStoreParams) {
+        match self {
+            Self::Local(tt) => tt.store(params),
+            #[cfg(feature = "multithreading")]
+            Self::Shared(tt) => tt.store(params),
+        }
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        match self {
+            Self::Local(tt) => tt.capacity(),
+            #[cfg(feature = "multithreading")]
+            Self::Shared(tt) => tt.capacity(),
+        }
+    }
+
+    #[inline]
+    pub fn used_entries(&self) -> usize {
+        match self {
+            Self::Local(tt) => tt.used_entries(),
+            #[cfg(feature = "multithreading")]
+            Self::Shared(tt) => tt.used_entries(),
+        }
+    }
+
+    #[inline]
+    pub fn fill_permille(&self) -> u32 {
+        match self {
+            Self::Local(tt) => tt.fill_permille(),
+            #[cfg(feature = "multithreading")]
+            Self::Shared(tt) => tt.fill_permille(),
+        }
+    }
+
+    #[inline]
+    #[cfg(all(target_arch = "x86_64", not(target_arch = "wasm32")))]
+    pub fn prefetch_entry(&self, hash: u64) {
+        match self {
+            Self::Local(tt) => tt.prefetch_entry(hash),
+            #[cfg(feature = "multithreading")]
+            Self::Shared(tt) => tt.prefetch_entry(hash),
+        }
+    }
+
+    #[inline]
+    pub fn increment_age(&self) {
+        match self {
+            Self::Local(tt) => tt.increment_age(),
+            #[cfg(feature = "multithreading")]
+            Self::Shared(tt) => tt.increment_age(),
+        }
+    }
+
+    #[inline]
+    pub fn clear(&self) {
+        match self {
+            Self::Local(tt) => tt.clear(),
+            #[cfg(feature = "multithreading")]
+            Self::Shared(tt) => tt.clear(),
+        }
+    }
 }
 
-// ============================================================================
-// TT Probe/Store with Shared TT Support (for Lazy SMP)
-// ============================================================================
+pub struct GlobalTtHandle;
 
-/// Probe the TT, using SharedTTView when available for Lazy SMP.
-/// Falls back to the Searcher's local TT if no shared TT is configured.
+impl GlobalTtHandle {
+    #[inline]
+    pub fn get(&self) -> Option<TranspositionTableRef<'_>> {
+        #[cfg(feature = "multithreading")]
+        if USE_SHARED_TT.load(std::sync::atomic::Ordering::Relaxed) {
+            return SHARED_TT.get().map(TranspositionTableRef::Shared);
+        }
+        LOCAL_TT.get().map(TranspositionTableRef::Local)
+    }
+
+    pub fn get_or_init<F>(&self, _f: F) -> TranspositionTableRef<'_>
+    where
+        F: FnOnce() -> TranspositionTable,
+    {
+        #[cfg(feature = "multithreading")]
+        if USE_SHARED_TT.load(std::sync::atomic::Ordering::Relaxed) {
+            let tt = SHARED_TT.get_or_init(|| SharedTranspositionTable::new(64));
+            return TranspositionTableRef::Shared(tt);
+        }
+        let tt = LOCAL_TT.get_or_init(|| LocalTranspositionTable::new(16));
+        TranspositionTableRef::Local(tt)
+    }
+}
+
+pub(crate) static GLOBAL_TT: GlobalTtHandle = GlobalTtHandle;
+
+/// Probe the TT. Dispatch based on thread configuration.
 #[inline]
 pub fn probe_tt_with_shared(
-    searcher: &Searcher,
+    _searcher: &Searcher,
     ctx: &ProbeContext,
 ) -> Option<(i32, i32, Option<Move>, bool)> {
-    let hash = ctx.hash;
-    let alpha = ctx.alpha;
-    let beta = ctx.beta;
-    let depth = ctx.depth;
-    let ply = ctx.ply;
-    let rule50_count = ctx.rule50_count;
-    let rule_limit = ctx.rule_limit;
-    // On WASM with shared TT configured, use SharedTTView
-    #[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-    {
-        if let Some(shared_tt) = create_shared_tt_view() {
-            // SAFETY: SharedTTView uses atomic operations for thread-safety
-            let result = unsafe { shared_tt.probe(hash, alpha, beta, depth, ply, rule_limit) };
-            return result;
-        }
-    }
-
-    // Fall back to local TT
-    searcher.tt.probe(&crate::search::tt::TTProbeParams {
-        hash,
-        alpha,
-        beta,
-        depth,
-        ply,
-        rule50_count,
-        rule_limit,
+    GLOBAL_TT.get().and_then(|tt| {
+        tt.probe(&crate::search::tt_defs::TTProbeParams {
+            hash: ctx.hash,
+            alpha: ctx.alpha,
+            beta: ctx.beta,
+            depth: ctx.depth,
+            ply: ctx.ply,
+            rule50_count: ctx.rule50_count,
+            rule_limit: ctx.rule_limit,
+        })
     })
 }
 
-/// Store to the TT, using SharedTTView when available for Lazy SMP.
-/// Falls back to the Searcher's local TT if no shared TT is configured.
+/// Store to the TT. Dispatch based on thread configuration.
 #[inline]
-pub fn store_tt_with_shared(searcher: &mut Searcher, ctx: &StoreContext) {
-    let hash = ctx.hash;
-    let depth = ctx.depth;
-    let flag = ctx.flag;
-    let score = ctx.score;
-    let static_eval = ctx.static_eval;
-    let best_move = ctx.best_move;
-    let ply = ctx.ply;
-    // On WASM with shared TT configured, use SharedTTView
-    #[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-    {
-        if let Some(shared_tt) = create_shared_tt_view() {
-            // Convert TTFlag to SharedTTFlag
-            let shared_flag = match flag {
-                TTFlag::None => SharedTTFlag::None,
-                TTFlag::Exact => SharedTTFlag::Exact,
-                TTFlag::LowerBound => SharedTTFlag::LowerBound,
-                TTFlag::UpperBound => SharedTTFlag::UpperBound,
-            };
-            // SAFETY: SharedTTView uses atomic operations for thread-safety
-            unsafe {
-                shared_tt.store(
-                    hash,
-                    depth,
-                    shared_flag,
-                    score,
-                    static_eval,
-                    best_move.as_ref(),
-                    ply,
-                    0, // generation - we use 0 for now since all workers share
-                    ctx.is_pv,
-                );
-            }
-            return;
-        }
+pub fn store_tt_with_shared(_searcher: &mut Searcher, ctx: &StoreContext) {
+    if let Some(tt) = GLOBAL_TT.get() {
+        tt.store(&crate::search::tt_defs::TTStoreParams {
+            hash: ctx.hash,
+            depth: ctx.depth,
+            flag: ctx.flag,
+            score: ctx.score,
+            static_eval: ctx.static_eval,
+            is_pv: ctx.is_pv,
+            best_move: ctx.best_move.clone(),
+            ply: ctx.ply,
+        });
     }
-
-    // Fall back to local TT
-    searcher.tt.store(&crate::search::tt::TTStoreParams {
-        hash,
-        depth,
-        flag,
-        score,
-        static_eval,
-        is_pv: ctx.is_pv,
-        best_move,
-        ply,
-    });
 }
 
 /// Timer abstraction to handle platform differences
@@ -469,31 +496,40 @@ pub struct MultiPVResult {
     pub stats: SearchStats,
 }
 
+/// Result from a single thread's search, used for Lazy SMP thread voting.
+/// Stockfish's thread voting algorithm weights votes by:
+///   (score - minScore + 14) * completedDepth
+/// This ensures deeper searches with better scores have more influence.
+#[cfg(feature = "multithreading")]
+#[derive(Clone, Debug)]
+pub struct ThreadResult {
+    /// Best move found by this thread
+    pub best_move: Move,
+    /// Score of the best move (from side-to-move perspective)
+    pub score: i32,
+    /// Highest completed depth
+    pub completed_depth: usize,
+    /// Length of the PV (longer PVs are more trustworthy)
+    pub pv_length: usize,
+    /// Total nodes searched
+    pub nodes: u64,
+    /// Thread index (for debugging)
+    pub thread_id: usize,
+}
+
 thread_local! {
     pub(crate) static GLOBAL_SEARCHER: RefCell<Option<Searcher>> = const { RefCell::new(None) };
 }
 
 fn build_search_stats(searcher: &Searcher) -> SearchStats {
-    #[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-    if let Some(shared) = create_shared_tt_view() {
-        // Use shared TT stats
-        let fill = unsafe { shared.fill_permille() };
-        let cap = shared.capacity();
-        let used = ((cap as u64 * fill as u64) / 1000) as usize;
-
-        return SearchStats {
-            nodes: searcher.hot.nodes,
-            tt_capacity: cap,
-            tt_used: used,
-            tt_fill_permille: fill,
-        };
-    }
-
+    let (cap, used, fill) = GLOBAL_TT.get().map_or((0, 0, 0), |tt| {
+        (tt.capacity(), tt.used_entries(), tt.fill_permille())
+    });
     SearchStats {
         nodes: searcher.hot.nodes,
-        tt_capacity: searcher.tt.capacity(),
-        tt_used: searcher.tt.used_entries(),
-        tt_fill_permille: searcher.tt.fill_permille(),
+        tt_capacity: cap,
+        tt_used: used,
+        tt_fill_permille: fill,
     }
 }
 
@@ -531,9 +567,6 @@ pub struct Searcher {
     /// Hot data - grouped for cache efficiency
     pub hot: SearcherHot,
 
-    // Transposition table
-    pub tt: TranspositionTable,
-
     // Triangular PV table: flat array indexed by pv_table[ply * MAX_PLY + offset]
     // Using Box to avoid stack overflow with 64*64 = 4096 Move entries
     pub pv_table: Box<[Option<Move>; MAX_PLY * MAX_PLY]>,
@@ -566,6 +599,9 @@ pub struct Searcher {
 
     // Previous iteration score for aspiration windows
     pub prev_score: i32,
+
+    // Depth fully completed in the current search
+    pub completed_depth: usize,
 
     // Silent mode - no info output
     pub silent: bool,
@@ -664,7 +700,6 @@ impl Searcher {
                 total_time_ms: 0.0,
                 iter_start_ms: 0.0,
             },
-            tt: TranspositionTable::new(16),
             pv_table,
             pv_length: [0; MAX_PLY],
             killers,
@@ -675,6 +710,7 @@ impl Searcher {
             eval_stack: vec![0; MAX_PLY],
             best_move_root: None,
             prev_score: 0,
+            completed_depth: 0,
             silent: false,
             thread_id: 0,
             move_buffers,
@@ -733,7 +769,9 @@ impl Searcher {
 
     /// Start a new search: reset per-search state and increment TT age (or clear if requested).
     pub fn new_search(&mut self) {
-        self.tt.increment_age();
+        if let Some(tt) = GLOBAL_TT.get() {
+            tt.increment_age();
+        }
 
         // Reset cumulative counters
         self.hot.nodes = 0;
@@ -758,6 +796,7 @@ impl Searcher {
 
         // Reset iterative deepening state
         self.prev_score = 0;
+        self.completed_depth = 0;
         self.best_move_root = None;
 
         // Reset killers - they are position-dependent and should be fresh for a new search
@@ -779,7 +818,9 @@ impl Searcher {
     /// Clears TT and resets all history tables to neutral values.
     pub fn clear(&mut self) {
         // Clear transposition table
-        self.tt.clear();
+        if let Some(tt) = GLOBAL_TT.get() {
+            tt.clear();
+        }
 
         // Reset main history
         for row in self.history.iter_mut() {
@@ -1048,7 +1089,7 @@ impl Searcher {
         } else {
             0
         };
-        let tt_fill = self.tt.fill_permille();
+        let tt_fill = GLOBAL_TT.get().map_or(0, |tt| tt.fill_permille());
 
         // Proper mate score display
         let score_str = if score > MATE_SCORE {
@@ -1176,8 +1217,31 @@ fn search_with_searcher(
     let mut best_score = -INFINITY;
     let mut prev_root_move_coords: Option<(i64, i64, i64, i64)> = None;
 
+    // Lazy SMP: Helper threads start at different depths to create search diversity.
+    // Thread 0 (main): starts at depth 1
+    // Thread 1: starts at depth 2 (skips trivial depth 1)
+    // Thread 2: starts at depth 1
+    // Thread 3: starts at depth 2
+    // etc. - odd threads get a head start on deeper search
+    let start_depth = if searcher.thread_id > 0 && searcher.thread_id % 2 == 1 {
+        2.min(max_depth) // Odd helpers skip depth 1
+    } else {
+        1
+    };
+
     // Iterative deepening with aspiration windows
-    for depth in 1..=max_depth {
+    for base_depth in start_depth..=max_depth {
+        // Lazy SMP depth offset: odd-indexed helper threads search at depth+1
+        // This creates statistical diversity - threads explore different depths
+        // and populate the TT with entries at various depths.
+        // Main thread (0) and even helpers: search at base_depth
+        // Odd helpers (1, 3, 5...): search at base_depth + 1
+        let depth = if searcher.thread_id > 0 && searcher.thread_id % 2 == 1 {
+            (base_depth + 1).min(max_depth)
+        } else {
+            base_depth
+        };
+
         searcher.reset_for_iteration();
         searcher.hot.iter_start_ms = searcher.hot.timer.elapsed_ms() as f64;
 
@@ -1253,8 +1317,9 @@ fn search_with_searcher(
             result
         };
 
-        // After depth 1 completes, allow time stops for subsequent depths
-        if depth == 1 {
+        // After first completed depth, allow time stops for subsequent depths
+        // For helpers starting at depth 2, this triggers after their first iteration
+        if base_depth == start_depth {
             searcher.hot.min_depth_required = 0;
         }
 
@@ -1273,6 +1338,7 @@ fn search_with_searcher(
             if !searcher.hot.stopped {
                 best_score = score;
                 searcher.prev_score = score;
+                searcher.completed_depth = depth;
             }
 
             let coords = (pv_move.from.x, pv_move.from.y, pv_move.to.x, pv_move.to.y);
@@ -1288,6 +1354,11 @@ fn search_with_searcher(
 
         if !searcher.hot.stopped && !searcher.silent {
             searcher.print_info(depth, score);
+        }
+
+        // Check global stop flag (for helper threads)
+        if GLOBAL_STOP.load(std::sync::atomic::Ordering::Relaxed) {
+            searcher.hot.stopped = true;
         }
 
         // Check if we found mate or time is up
@@ -1388,11 +1459,255 @@ pub fn get_best_move(
     silent: bool,
     is_soft_limit: bool,
 ) -> Option<(Move, i32, SearchStats)> {
-    get_best_move_threaded(
+    get_best_move_parallel(
         game,
         max_depth,
         time_limit_ms,
         time_limit_ms, // Use input as both opt and max for basic convenience wrapper
+        silent,
+        is_soft_limit,
+    )
+}
+
+#[cfg(feature = "multithreading")]
+pub fn get_best_move_parallel(
+    game: &mut GameState,
+    max_depth: usize,
+    opt_time_ms: u128,
+    max_time_ms: u128,
+    silent: bool,
+    is_soft_limit: bool,
+) -> Option<(Move, i32, SearchStats)> {
+    use rustc_hash::FxHashMap;
+    use std::sync::{Arc, Mutex};
+
+    GLOBAL_TT.get_or_init(|| TranspositionTable::new(32));
+
+    // Clear global stop flag
+    GLOBAL_STOP.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    let num_threads = rayon::current_num_threads().max(1);
+
+    // WASM SharedArrayBuffer and Web Worker communication have significant overhead.
+    // Even 4 threads causes slowdown due to rayon/WebWorker scheduling costs.
+    // For WASM, limit to 2 threads max (main + 1 helper) for any positive benefit.
+    #[cfg(target_arch = "wasm32")]
+    let num_threads = num_threads.min(2);
+
+    USE_SHARED_TT.store(num_threads > 1, std::sync::atomic::Ordering::Relaxed);
+
+    if num_threads == 1 {
+        // Single-threaded: use local TT for best performance
+        GLOBAL_TT.get_or_init(|| TranspositionTable::new(16));
+        return get_best_move_threaded(
+            game,
+            max_depth,
+            opt_time_ms,
+            max_time_ms,
+            silent,
+            0,
+            is_soft_limit,
+        );
+    }
+
+    // Initialize TT - for WASM we don't share it, for native we do
+    GLOBAL_TT.get_or_init(|| TranspositionTable::new(64));
+
+    // Shared storage for thread results - all threads contribute to voting
+    let results: Arc<Mutex<Vec<ThreadResult>>> =
+        Arc::new(Mutex::new(Vec::with_capacity(num_threads)));
+
+    rayon::scope(|s| {
+        // Spawn helper threads (1..num_threads)
+        for i in 1..num_threads {
+            let results_clone = Arc::clone(&results);
+            let mut game_clone = game.clone();
+
+            s.spawn(move |_| {
+                if let Some((best_move, score, stats)) = get_best_move_threaded(
+                    &mut game_clone,
+                    max_depth,
+                    opt_time_ms,
+                    max_time_ms,
+                    true, // Helpers are always silent
+                    i,
+                    is_soft_limit,
+                ) {
+                    // Get PV length from thread-local searcher
+                    let pv_len = GLOBAL_SEARCHER
+                        .with(|cell| cell.borrow().as_ref().map_or(1, |s| s.pv_length[0].max(1)));
+                    let completed_depth = GLOBAL_SEARCHER
+                        .with(|cell| cell.borrow().as_ref().map_or(1, |s| s.completed_depth));
+
+                    let result = ThreadResult {
+                        best_move,
+                        score,
+                        completed_depth: completed_depth.max(1),
+                        pv_length: pv_len,
+                        nodes: stats.nodes,
+                        thread_id: i,
+                    };
+                    if let Ok(mut results) = results_clone.lock() {
+                        results.push(result);
+                    }
+                }
+            });
+        }
+
+        // Run main search on thread 0 (this thread)
+        if let Some((best_move, score, stats)) = get_best_move_threaded(
+            game,
+            max_depth,
+            opt_time_ms,
+            max_time_ms,
+            silent, // Main thread respects silent flag
+            0,
+            is_soft_limit,
+        ) {
+            let pv_len = GLOBAL_SEARCHER
+                .with(|cell| cell.borrow().as_ref().map_or(1, |s| s.pv_length[0].max(1)));
+            let completed_depth = GLOBAL_SEARCHER
+                .with(|cell| cell.borrow().as_ref().map_or(1, |s| s.completed_depth));
+
+            let result = ThreadResult {
+                best_move,
+                score,
+                completed_depth: completed_depth.max(1),
+                pv_length: pv_len,
+                nodes: stats.nodes,
+                thread_id: 0,
+            };
+            if let Ok(mut results) = results.lock() {
+                results.push(result);
+            }
+        }
+
+        // Signal all helper threads to stop
+        GLOBAL_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+
+    // All threads have finished - now apply thread voting to select best move
+    let all_results = Arc::try_unwrap(results)
+        .ok()
+        .and_then(|m| m.into_inner().ok())
+        .unwrap_or_default();
+
+    if all_results.is_empty() {
+        return None;
+    }
+
+    // ========================================================================
+    // Thread Voting Algorithm (based on Stockfish's get_best_thread)
+    // ========================================================================
+
+    // Step 1: Find minimum score among all threads
+    let min_score = all_results.iter().map(|r| r.score).min().unwrap_or(0);
+
+    // Step 2: Build vote map - each move gets weighted votes from threads
+    // Vote weight = (score - minScore + 14) * completedDepth
+    // The +14 ensures even the worst-scoring thread contributes positively
+    let mut votes: FxHashMap<(i64, i64, i64, i64), i64> = FxHashMap::default();
+
+    for r in &all_results {
+        let move_key = (
+            r.best_move.from.x,
+            r.best_move.from.y,
+            r.best_move.to.x,
+            r.best_move.to.y,
+        );
+        let vote_value = (r.score - min_score + 14) as i64 * r.completed_depth as i64;
+        *votes.entry(move_key).or_insert(0) += vote_value;
+    }
+
+    // Step 3: Select best thread using Stockfish's criteria
+    let mut best_idx = 0;
+
+    // Helper to compute voting value for a thread
+    let thread_voting_value =
+        |r: &ThreadResult| -> i64 { (r.score - min_score + 14) as i64 * r.completed_depth as i64 };
+
+    for (i, r) in all_results.iter().enumerate() {
+        let best = &all_results[best_idx];
+
+        let best_move_key = (
+            best.best_move.from.x,
+            best.best_move.from.y,
+            best.best_move.to.x,
+            best.best_move.to.y,
+        );
+        let new_move_key = (
+            r.best_move.from.x,
+            r.best_move.from.y,
+            r.best_move.to.x,
+            r.best_move.to.y,
+        );
+
+        let best_vote = votes.get(&best_move_key).copied().unwrap_or(0);
+        let new_vote = votes.get(&new_move_key).copied().unwrap_or(0);
+
+        let best_in_proven_win = is_win(best.score);
+        let new_in_proven_win = is_win(r.score);
+        let best_in_proven_loss = best.score != -INFINITY && is_loss(best.score);
+        let new_in_proven_loss = r.score != -INFINITY && is_loss(r.score);
+
+        // Prefer threads with longer PVs (more trustworthy)
+        let better_voting_with_pv = thread_voting_value(r) * (if r.pv_length > 2 { 1 } else { 0 })
+            > thread_voting_value(best) * (if best.pv_length > 2 { 1 } else { 0 });
+
+        if best_in_proven_win {
+            // Already in a winning position: pick the fastest mate
+            if r.score > best.score {
+                best_idx = i;
+            }
+        } else if best_in_proven_loss {
+            // In a losing position: pick the longest resistance
+            if new_in_proven_loss && r.score < best.score {
+                best_idx = i;
+            }
+        } else if new_in_proven_win
+            || new_in_proven_loss
+            || (!is_loss(r.score)
+                && (new_vote > best_vote || (new_vote == best_vote && better_voting_with_pv)))
+        {
+            best_idx = i;
+        }
+    }
+
+    let best_result = &all_results[best_idx];
+
+    // Aggregate total nodes from all threads for accurate NPS reporting
+    let total_nodes: u64 = all_results.iter().map(|r| r.nodes).sum();
+
+    // Build stats from aggregated data
+    let (cap, used, fill) = GLOBAL_TT.get().map_or((0, 0, 0), |tt| {
+        (tt.capacity(), tt.used_entries(), tt.fill_permille())
+    });
+    let stats = SearchStats {
+        nodes: total_nodes,
+        tt_capacity: cap,
+        tt_used: used,
+        tt_fill_permille: fill,
+    };
+
+    Some((best_result.best_move.clone(), best_result.score, stats))
+}
+
+#[cfg(not(feature = "multithreading"))]
+pub fn get_best_move_parallel(
+    game: &mut GameState,
+    max_depth: usize,
+    opt_time_ms: u128,
+    max_time_ms: u128,
+    silent: bool,
+    is_soft_limit: bool,
+) -> Option<(Move, i32, SearchStats)> {
+    // Init TT if needed
+    GLOBAL_TT.get_or_init(|| TranspositionTable::new(16));
+    get_best_move_threaded(
+        game,
+        max_depth,
+        opt_time_ms,
+        max_time_ms,
         silent,
         0,
         is_soft_limit,
@@ -1403,7 +1718,7 @@ pub fn get_best_move(
 /// Helper threads (thread_id > 0) skip the first move to distribute work.
 /// Uses persistent GLOBAL_SEARCHER - TT and histories persist across searches.
 /// Call reset_search_state() to clear for a new game.
-pub fn get_best_move_threaded(
+fn get_best_move_threaded(
     game: &mut GameState,
     max_depth: usize,
     opt_time_ms: u128,
@@ -1812,7 +2127,9 @@ pub fn negamax_node_count_for_depth(game: &mut GameState, depth: usize) -> u64 {
     searcher.set_corrhist_mode(game);
     searcher.reset_for_iteration();
     searcher.decay_history();
-    searcher.tt.clear();
+    GLOBAL_TT
+        .get_or_init(|| TranspositionTable::new(16))
+        .clear();
 
     // Generate and filter legal moves
     let moves = game.get_legal_moves();
@@ -1851,7 +2168,7 @@ fn negamax_root(
 
     searcher.pv_length[0] = 0;
 
-    let hash = TranspositionTable::generate_hash(game);
+    let hash = game.hash;
     let mut tt_move: Option<Move> = None;
 
     // Probe TT for best move from previous search (uses shared TT if configured)
@@ -2112,7 +2429,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     };
 
     // Transposition table probe for hash move and potential cutoff
-    let hash = TranspositionTable::generate_hash(game);
+    let hash = game.hash;
     let mut tt_move: Option<Move> = None;
     let mut tt_value: Option<i32> = None;
     let mut tt_depth: u8 = 0; // For TT move extension
@@ -2140,8 +2457,10 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         tt_is_pv = is_pv_ret;
 
         // Get TT depth for qsearch extension decision
-        if let Some((_, d, _, _, _, _)) = searcher.tt.probe_for_singular(hash, ply) {
-            tt_depth = d;
+        if let Some(tt) = GLOBAL_TT.get() {
+            if let Some((_, d, _, _, _, _)) = tt.probe_for_singular(hash, ply) {
+                tt_depth = d;
+            }
         }
         // In non-PV nodes, use TT cutoff if valid score returned
         // Adding cutNode check for node type consistency
@@ -2438,16 +2757,16 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     // This avoids searching positions where we already know there's a good move
     {
         let small_prob_cut_beta = beta + low_depth_probcut_margin();
-        if let Some((tt_flag, tt_depth, tt_score, _, _, _)) =
-            searcher.tt.probe_for_singular(hash, ply)
-        {
-            if (tt_flag == TTFlag::LowerBound || tt_flag == TTFlag::Exact)
-                && tt_depth as usize >= depth.saturating_sub(4)
-                && tt_score >= small_prob_cut_beta
-                && !is_decisive(beta)
-                && !is_decisive(tt_score)
-            {
-                return small_prob_cut_beta;
+        if let Some(tt) = GLOBAL_TT.get() {
+            if let Some((tt_flag, tt_depth, tt_score, _, _, _)) = tt.probe_for_singular(hash, ply) {
+                if (tt_flag == TTFlag::LowerBound || tt_flag == TTFlag::Exact)
+                    && tt_depth as usize >= depth.saturating_sub(4)
+                    && tt_score >= small_prob_cut_beta
+                    && !is_decisive(beta)
+                    && !is_decisive(tt_score)
+                {
+                    return small_prob_cut_beta;
+                }
             }
         }
     }
@@ -2466,8 +2785,10 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     // We cache the TT probe result here to avoid re-probing
     let se_conditions = if depth >= 6 && !in_check {
         tt_move.as_ref().and_then(|_| {
-            searcher.tt.probe_for_singular(hash, ply).and_then(
-                |(tt_flag, tt_depth, tt_score, _, _, _)| {
+            GLOBAL_TT
+                .get()
+                .and_then(|tt| tt.probe_for_singular(hash, ply))
+                .and_then(|(tt_flag, tt_depth, tt_score, _, _, _)| {
                     if (tt_flag == TTFlag::LowerBound || tt_flag == TTFlag::Exact)
                         && tt_depth as usize >= depth.saturating_sub(3)
                         && !is_decisive(tt_score)
@@ -2476,8 +2797,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     } else {
                         None
                     }
-                },
-            )
+                })
         })
     } else {
         None
@@ -2600,7 +2920,9 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 ^ SIDE_KEY
                 ^ piece_key(p_type, p_color, m.from.x, m.from.y)
                 ^ piece_key(p_type, p_color, m.to.x, m.to.y);
-            searcher.tt.prefetch_entry(child_hash);
+            if let Some(tt) = GLOBAL_TT.get() {
+                tt.prefetch_entry(child_hash);
+            }
         }
 
         let mut undo = game.make_move(&m);
@@ -3636,7 +3958,7 @@ mod tests {
 
     #[test]
     fn test_tt_basic_operations() {
-        let tt = TranspositionTable::new(1);
+        let tt = LocalTranspositionTable::new(1);
 
         assert!(tt.capacity() > 0);
         assert_eq!(tt.used_entries(), 0);
@@ -3660,10 +3982,11 @@ mod tests {
 
     #[test]
     fn test_searcher_initialization() {
+        GLOBAL_TT.get_or_init(|| TranspositionTable::new(16));
         let searcher = Searcher::new(10000);
 
         assert_eq!(searcher.hot.nodes, 0);
-        assert!(searcher.tt.capacity() > 0);
+        assert!(GLOBAL_TT.get().unwrap().capacity() > 0);
     }
 
     // ======================== History Table Tests ========================
@@ -3834,18 +4157,6 @@ mod tests {
         assert!(adjusted.abs() < raw_eval.abs() + 1000);
     }
 
-    // ======================== Build Search Stats Tests ========================
-
-    #[test]
-    fn test_build_search_stats() {
-        let searcher = Searcher::new(1000);
-        let stats = build_search_stats(&searcher);
-
-        assert!(stats.tt_capacity > 0);
-        assert_eq!(stats.tt_used, 0);
-        assert_eq!(stats.tt_fill_permille, 0);
-    }
-
     // ======================== Extract PV Tests ========================
 
     #[test]
@@ -3942,8 +4253,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tt_integration_via_searcher() {
-        let mut searcher = Searcher::new(1000);
+    fn test_tt_integration_via_global() {
+        GLOBAL_TT.get_or_init(|| TranspositionTable::new(16));
+        // We don't need searcher for TT anymore
         let hash = 123456789;
         let depth = 5;
         let score = 1000;
@@ -3954,29 +4266,33 @@ mod tests {
         );
 
         // Store EXACT score using correct TT signature:
-        // store(&mut self, hash, depth, flag, score, move, ply)
-        searcher.tt.store(&crate::search::tt::TTStoreParams {
-            hash,
-            depth,
-            flag: crate::search::tt::TTFlag::Exact,
-            score,
-            static_eval: INFINITY + 1,
-            is_pv: true,
-            best_move: Some(best_move),
-            ply: 0,
-        });
+        GLOBAL_TT
+            .get()
+            .unwrap()
+            .store(&crate::search::tt_defs::TTStoreParams {
+                hash,
+                depth,
+                flag: crate::search::tt_defs::TTFlag::Exact,
+                score,
+                static_eval: INFINITY + 1,
+                is_pv: true,
+                best_move: Some(best_move),
+                ply: 0,
+            });
 
         // Probe EXACT score using correct TT signature:
-        // probe(&self, hash, alpha, beta, depth, ply, rule50, rule_limit)
-        let result = searcher.tt.probe(&crate::search::tt::TTProbeParams {
-            hash,
-            alpha: score - 100,
-            beta: score + 100,
-            depth,
-            ply: 0,
-            rule50_count: 0,
-            rule_limit: 100,
-        });
+        let result = GLOBAL_TT
+            .get()
+            .unwrap()
+            .probe(&crate::search::tt_defs::TTProbeParams {
+                hash,
+                alpha: score - 100,
+                beta: score + 100,
+                depth,
+                ply: 0,
+                rule50_count: 0,
+                rule_limit: 100,
+            });
         assert!(result.is_some());
         let (probed_score, _, probed_move, _) = result.unwrap();
         assert_eq!(probed_score, score);

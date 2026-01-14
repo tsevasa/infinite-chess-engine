@@ -24,6 +24,7 @@ A high-performance Rust chess engine compiled to WebAssembly, designed for [Infi
 - **Killer moves** and **history heuristic** for move ordering
 - **Quiescence search** for tactical accuracy
 - **Static Exchange Evaluation (SEE)** for capture pruning
+- **Lazy SMP Multithreading**: Scalable parallel search with runtime implementation dispatch
 
 ### Evaluation
 - Material counting with tuned piece values
@@ -47,10 +48,13 @@ A high-performance Rust chess engine compiled to WebAssembly, designed for [Infi
 rustup target add wasm32-unknown-unknown
 cargo install wasm-pack
 
-# 2. Build for browser
+# 2. Build for browser (Single-threaded)
 wasm-pack build --target web
 
-# 3. Output is in pkg/ - ready for use with your bundler
+# 3. Build for browser (Multi-threaded / Lazy SMP)
+node build_mt.js
+
+# 4. Output is in pkg/ - ready for use with your bundler
 ```
 
 For detailed setup instructions, see **[docs/SETUP.md](docs/SETUP.md)**.
@@ -75,6 +79,25 @@ const result = engine.get_best_move_with_time(500);
 // Get all legal moves
 const moves = engine.get_legal_moves_js();
 ```
+
+### Multithreaded usage (Lazy SMP)
+
+To use parallel search, you must initialize the WASM module's thread pool and set the desired number of threads:
+
+```javascript
+import init, { Engine, initThreadPool } from './pkg/hydrochess_wasm.js';
+
+await init();
+
+// Initialize thread pool (e.g., 2 threads)
+await initThreadPool(2);
+
+const engine = new Engine(gameState);
+const result = engine.get_best_move_with_time(1000); // Now uses 2 threads
+```
+
+> [!NOTE]
+> Parallel WASM requires specific HTTP headers (`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`) to be served by your web server.
 
 ### Game State Format
 
@@ -120,65 +143,6 @@ cargo test --test perft
 ```
 
 For testing engine strength changes, see **[sprt/README.md](sprt/README.md)**.
-
----
-
-## 📁 Project Structure
-
-```
-hydrochess-wasm/
-├── src/
-│   ├── lib.rs              # WASM bindings and Engine struct
-│   ├── board.rs            # Board representation and piece types
-│   ├── game.rs             # GameState, make/undo moves, repetition
-│   ├── moves.rs            # Move generation (legal / pseudo-legal)
-│   ├── attacks.rs          # Fast attack bitboard lookups
-│   ├── search.rs           # Main IDDFS search loop
-│   ├── search/             # Search internals
-│   │   ├── tt.rs           # Transposition table
-│   │   ├── ordering.rs     # Move ordering heuristics
-│   │   ├── see.rs          # Static exchange evaluation
-│   │   ├── noisy.rs        # search.rs but with eval noise
-│   │   ├── movegen.rs      # Search-specific move ordering
-│   │   └── params.rs       # Tunable search constants
-│   ├── evaluation/         # Position evaluation
-│   │   ├── base.rs         # Core evaluation + piece-square logic
-│   │   ├── mop_up.rs       # Endgame evaluation for mating
-│   │   ├── insufficient_material.rs # Draw detection
-│   │   └── variants/       # Variant-specific evaluation
-│   ├── tiles/              # Bitboard tile management
-│   │   ├── mod.rs          # Core tile structure
-│   │   └── magic.rs        # Magic bitboards (sliding pieces)
-│   └── simd.rs             # Hardware acceleration (optional)
-├── sprt/                   # Testing and Tuning tools
-│   ├── sprt.js             # Web SPRT helper
-│   ├── spsa.mjs            # SPSA parameter tuner
-│   └── texel_tuner.js      # Texel evaluation tuner
-├── tests/                  # Integration tests
-│   ├── perft.rs            # Move generation accuracy
-│   └── endgame_mates.rs    # Mating pattern validation
-├── docs/                   # Documentation
-│   ├── SETUP.md            # Installation guide
-│   └── CONTRIBUTING.md     # Contribution workflow
-└── pkg/                    # WASM build output (generated)
-```
-
----
-
-## 🎯 Piece Type Codes
-
-| Code | Piece | Code | Piece |
-|------|-------|------|-------|
-| `p` | Pawn | `m` | Amazon |
-| `n` | Knight | `c` | Chancellor |
-| `b` | Bishop | `a` | Archbishop |
-| `r` | Rook | `e` | Centaur |
-| `q` | Queen | `d` | Royal Centaur |
-| `k` | King | `h` | Hawk |
-| `g` | Guard | `s` | Knightrider |
-| `l` | Camel | `o` | Rose |
-| `i` | Giraffe | `u` | Huygen |
-| `z` | Zebra | `y` | Royal Queen |
 
 ---
 

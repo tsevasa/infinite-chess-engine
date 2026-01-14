@@ -1,6 +1,6 @@
 [package]
 name = "hydrochess-wasm"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["FirePlank <44502537+FirePlank@users.noreply.github.com>"]
 edition = "2024"
 repository = "https://github.com/FirePlank/infinite-chess-engine"
@@ -42,8 +42,10 @@ rand = { version = "0.8", optional = true }
 # all the `std::fmt` and `std::panicking` infrastructure, so isn't great for
 # code size when deploying.
 console_error_panic_hook = { version = "0.1.7", optional = true }
-# smallvec = { version = "1.15.1", features = ["write"] }
 rayon = { version = "1.8", optional = true }
+wasm-bindgen-rayon = { version = "1.2", features = [
+    "no-bundler",
+], optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 serde_json = "1.0"
@@ -52,7 +54,7 @@ serde_json = "1.0"
 default = []
 eval_tuning = ["serde_json"]
 search_tuning = ["serde_json", "rand", "rayon"]
-multithreading = []
+multithreading = ["rayon", "wasm-bindgen-rayon"]
 debug = ["console_error_panic_hook"]
 
 

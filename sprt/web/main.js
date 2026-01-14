@@ -1,6 +1,11 @@
-import initOld, { Engine as EngineOld } from './pkg-old/hydrochess_wasm.js';
-import initNew, { Engine as EngineNew } from './pkg-new/hydrochess_wasm.js';
-import { VARIANTS, getVariantData, getVariantsWithCustomEval } from './variants.js';
+import initOld, * as wasmOld from './pkg-old/hydrochess_wasm.js';
+const EngineOld = wasmOld.Engine;
+import initNew, * as wasmNew from './pkg-new/hydrochess_wasm.js';
+const EngineNew = wasmNew.Engine;
+const initThreadPoolNew = wasmNew.initThreadPool;
+import { VARIANTS, getVariantData, getAllVariants, getVariantsWithCustomEval } from './variants.js';
+
+let isNewEngineMT = false;
 
 // Map internal engine piece letters to infinitechess.org ICN codes (lowercase for ICN)
 function engineLetterToICNCode(letter) {
@@ -11,6 +16,38 @@ function engineLetterToICNCode(letter) {
         'd': 'rc', 's': 'nr', 'u': 'hu', 'o': 'ro', 'x': 'ob', 'v': 'vo'
     };
     return map[letter] || letter;
+}
+
+function updateMTUI() {
+    if (isNewEngineMT) {
+        sprtConcurrencyEl.value = "1";
+        sprtConcurrencyEl.disabled = true;
+        sprtConcurrencyEl.title = "Concurrency locked to 1 game while Multithreading is active.";
+
+        // Dim the label
+        const label = sprtConcurrencyEl.previousElementSibling;
+        if (label && label.tagName === 'LABEL') {
+            label.classList.add('disabled-label');
+            label.textContent = 'Concurrency (locked for MT)';
+        }
+
+        // Add MT indicator to header if not already there
+        if (!document.getElementById('mtBadge')) {
+            const h1 = document.querySelector('header h1');
+            const badge = document.createElement('span');
+            badge.id = 'mtBadge';
+            badge.className = 'mt-badge';
+            badge.textContent = 'MT';
+            h1.appendChild(badge);
+        }
+
+        log('Multithreaded engine detected. Concurrency locked to 1 game for stability.', 'info');
+
+        // Set MT defaults: 3+0.03 STC
+        sprtTcMode.value = 'standard';
+        sprtTimeControlEl.value = '3+0.03';
+        updateTcUi(); // Sync the UI labels and disabled states
+    }
 }
 
 // UI Elements
@@ -132,19 +169,9 @@ function getRandomOpening() {
 
 // Variant management functions
 function loadVariants() {
-    // Create a temporary worker to get variants
-    const worker = new Worker('./sprt-worker.js', { type: 'module' });
-
-    worker.onmessage = (e) => {
-        if (e.data.type === 'variants') {
-            availableVariants = e.data.variants;
-            populateVariantDropdown();
-            loadVariantSelection();
-            worker.terminate();
-        }
-    };
-
-    worker.postMessage({ type: 'getVariants' });
+    availableVariants = getAllVariants();
+    populateVariantDropdown();
+    loadVariantSelection();
 }
 
 function populateVariantDropdown() {
@@ -664,10 +691,19 @@ async function initWasm() {
         // Initialize both old and new WASM modules
         await initOld();
         await initNew();
+
+        isNewEngineMT = (typeof initThreadPoolNew === 'function');
+
         wasmReady = true;
         setStatus('ready', 'WASM loaded and ready');
         runSprtBtn.disabled = false;
-        sprtConcurrencyEl.value = CONFIG.concurrency;
+
+        if (isNewEngineMT) {
+            updateMTUI();
+        } else {
+            sprtConcurrencyEl.value = CONFIG.concurrency;
+        }
+
         log('WASM module initialized successfully', 'success');
 
 
@@ -1249,14 +1285,31 @@ sprtTcMode.addEventListener('change', updateTcUi);
 
 function updateTcUi() {
     const mode = sprtTcMode.value;
+    const tcLabel = document.getElementById('sprtTcLabel');
+
+    // Reset label opacity
+    if (tcLabel) tcLabel.classList.remove('disabled-label');
+
     if (mode === 'smart_mix') {
         sprtTimeControlEl.value = 'Smart Mix';
         sprtTimeControlEl.disabled = true;
+        if (tcLabel) {
+            tcLabel.classList.add('disabled-label');
+            tcLabel.textContent = 'Time Control (Config Ignored)';
+        }
     } else {
         sprtTimeControlEl.disabled = false;
-        // If switching away from Smart Mix, restore a logical default if the field still says "Smart Mix"
+
+        // Update label text based on mode
+        if (tcLabel) {
+            if (mode === 'standard') tcLabel.textContent = 'Time Control (base+inc)';
+            else if (mode === 'fixed_time') tcLabel.textContent = 'Fixed Time per Move (s)';
+            else if (mode === 'fixed_depth') tcLabel.textContent = 'Fixed Depth (ply)';
+        }
+
+        // If switching away from Smart Mix, restore a logical default
         if (sprtTimeControlEl.value === 'Smart Mix') {
-            if (mode === 'fixed_time') sprtTimeControlEl.value = '1.0';
+            if (mode === 'fixed_time') sprtTimeControlEl.value = '0.15';
             else if (mode === 'fixed_depth') sprtTimeControlEl.value = '6';
             else sprtTimeControlEl.value = '10+0.1';
         }
@@ -1346,29 +1399,3 @@ window.__sprt_compute_features = async (rawSamples) => {
 };
 
 initWasm();
-
-/* UI Logic for TC Mode */
-if (typeof sprtTcMode !== 'undefined' && sprtTcMode) {
-    const sprtTcLabel = document.getElementById('sprtTcLabel');
-    // sprtTimeControlEl is already defined globally at top
-
-    sprtTcMode.addEventListener('change', () => {
-        const mode = sprtTcMode.value;
-        if (mode === 'standard') {
-            sprtTcLabel.textContent = 'Time Control (base+inc)';
-            if (!sprtTimeControlEl.value.includes('+')) sprtTimeControlEl.value = '10+0.1';
-            sprtTimeControlEl.disabled = false;
-        } else if (mode === 'fixed_time') {
-            sprtTcLabel.textContent = 'Fixed Time per Move (s)';
-            if (sprtTimeControlEl.value.includes('+') || !sprtTimeControlEl.value) sprtTimeControlEl.value = '0.15';
-            sprtTimeControlEl.disabled = false;
-        } else if (mode === 'fixed_depth') {
-            sprtTcLabel.textContent = 'Fixed Depth (ply)';
-            if (sprtTimeControlEl.value.includes('.') || sprtTimeControlEl.value.includes('+')) sprtTimeControlEl.value = '4';
-            sprtTimeControlEl.disabled = false;
-        } else if (mode === 'smart_mix') {
-            sprtTcLabel.textContent = 'Smart Mix (Config ignored)';
-            sprtTimeControlEl.disabled = true;
-        }
-    });
-}

@@ -9,11 +9,29 @@ function engineLetterToSiteCode(letter) {
     return map[letter] || letter.toUpperCase();
 }
 
-import initOld, { Engine as EngineOld } from './pkg-old/hydrochess_wasm.js';
-import initNew, { Engine as EngineNew } from './pkg-new/hydrochess_wasm.js';
+import initOld, * as wasmOld from './pkg-old/hydrochess_wasm.js';
+const EngineOld = wasmOld.Engine;
+import initNew, * as wasmNew from './pkg-new/hydrochess_wasm.js';
+const EngineNew = wasmNew.Engine;
+const initThreadPool = wasmNew.initThreadPool;
 import { getVariantData, getAllVariants } from './variants.js';
 
 let wasmReady = false;
+let threadPoolInitialized = false;
+
+async function tryInitThreadPool(count) {
+    if (threadPoolInitialized) return;
+    if (typeof initThreadPool !== 'function') return;
+
+    try {
+        console.log(`[sprt-worker] Initializing thread pool with ${count} threads...`);
+        await initThreadPool(count);
+        threadPoolInitialized = true;
+        console.log(`[sprt-worker] Thread pool initialized.`);
+    } catch (e) {
+        console.warn(`[sprt-worker] Failed to initialize thread pool:`, e);
+    }
+}
 
 function getVariantPosition(variantName, clock = null) {
     const variantData = getVariantData(variantName);
@@ -476,6 +494,10 @@ async function ensureInit() {
     if (!wasmReady) {
         await initOld();
         await initNew();
+
+        // Detect thread support and initialize pool if available
+        await tryInitThreadPool(2);
+
         wasmReady = true;
     }
 }

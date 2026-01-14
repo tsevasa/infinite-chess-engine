@@ -2,114 +2,11 @@ use crate::board::{Coordinate, Piece, PieceType, PlayerColor};
 use crate::game::GameState;
 use crate::moves::Move;
 
-use super::{INFINITY, MATE_SCORE, MATE_VALUE};
+use super::tt_defs::{TTFlag, TTProbeParams, TTStoreParams, value_from_tt, value_to_tt};
+use super::{INFINITY, MATE_SCORE};
 
-/// Value adjustment for storage:
-/// Adjusts a mate score from "plies to mate from the root" to
-/// "plies to mate from the current position" for storage in TT.
-/// Standard scores are unchanged.
-#[inline]
-pub fn value_to_tt(value: i32, ply: usize) -> i32 {
-    // is_win: value > MATE_SCORE (positive mate score)
-    if value > MATE_SCORE {
-        value + ply as i32
-    }
-    // is_loss: value < -MATE_SCORE (negative mate score, being mated)
-    else if value < -MATE_SCORE {
-        value - ply as i32
-    } else {
-        value
-    }
-}
-
-pub struct TTProbeParams {
-    pub hash: u64,
-    pub alpha: i32,
-    pub beta: i32,
-    pub depth: usize,
-    pub ply: usize,
-    pub rule50_count: u32,
-    pub rule_limit: i32,
-}
-
-pub struct TTStoreParams {
-    pub hash: u64,
-    pub depth: usize,
-    pub flag: TTFlag,
-    pub score: i32,
-    pub static_eval: i32,
-    pub is_pv: bool,
-    pub best_move: Option<Move>,
-    pub ply: usize,
-}
-
-/// Value adjustment for retrieval:
-/// Inverse of value_to_tt: adjusts TT score back to root-relative.
-/// Downgrades mate scores that are unreachable due to the 50-move rule.
-///
-/// Parameters:
-/// - value: The score stored in TT
-/// - ply: Current search ply
-/// - rule50_count: Current halfmove clock (NOT remaining moves)
-/// - rule_limit: Current move rule limit (e.g. 100 for 50-move rule)
-#[inline]
-pub fn value_from_tt(value: i32, ply: usize, rule50_count: u32, rule_limit: i32) -> i32 {
-    // Handle winning mate scores (we are giving mate)
-    if value > MATE_SCORE {
-        // mate_distance = how many plies until mate from the stored position
-        let mate_distance = MATE_VALUE - value;
-
-        // Or: mate_distance + rule50_count > rule_limit
-        if mate_distance + rule50_count as i32 > rule_limit {
-            // Downgrade to non-mate winning score (just below mate threshold)
-            return MATE_SCORE - 1;
-        }
-
-        // Adjust back to root-relative
-        return value - ply as i32;
-    }
-
-    // Handle losing mate scores (we are being mated)
-    if value < -MATE_SCORE {
-        let mate_distance = MATE_VALUE + value;
-
-        if mate_distance + rule50_count as i32 > rule_limit {
-            // Downgrade to non-mate losing score
-            return -MATE_SCORE + 1;
-        }
-
-        return value + ply as i32;
-    }
-
-    value
-}
-
-// Constants
-
-/// Number of entries per bucket (cluster). 4 entries × 64 bytes = 256 bytes.
 const ENTRIES_PER_BUCKET: usize = 4;
-
-/// Sentinel value indicating no move is stored
 const NO_MOVE_SENTINEL: i64 = i64::MIN;
-
-// TT Entry Flags
-
-/// TT bound type (2 bits)
-#[derive(Clone, Copy, PartialEq, Debug)]
-#[repr(u8)]
-pub enum TTFlag {
-    None = 0,
-    UpperBound = 1, // Score <= alpha (all node, failed low)
-    LowerBound = 2, // Score >= beta (cut node, failed high)
-    Exact = 3,      // Exact score (PV node)
-}
-
-impl TTFlag {
-    #[inline]
-    fn from_u8(v: u8) -> Self {
-        unsafe { std::mem::transmute(v & 0b11) }
-    }
-}
 
 // ============================================================================
 // Compact Move Representation
@@ -329,17 +226,27 @@ impl TTBucket {
 /// - Align entries to cache lines (64 bytes)
 /// - Store FULL 64-bit hash key to prevent collisions
 /// - Power-of-two sizing for fast index calculation
-pub struct TranspositionTable {
-    buckets: Vec<TTBucket>,
+use std::cell::UnsafeCell;
+
+/// TranspositionTable with 0-overhead single-threaded interior mutability.
+/// Uses UnsafeCell to allow mutation via &self, matching the shared TT API.
+/// SAFE: This file is only compiled when multithreading is DISABLED.
+pub struct LocalTranspositionTable {
+    buckets: UnsafeCell<Vec<TTBucket>>,
     /// Bitmask for indexing (capacity is always power of two)
     mask: usize,
     /// Current generation (incremented each search)
-    generation: u8,
+    generation: UnsafeCell<u8>,
     /// Number of entries currently stored (for fill percentage)
-    used: usize,
+    used: UnsafeCell<usize>,
 }
 
-impl TranspositionTable {
+// Required for OnceLock<LocalTranspositionTable>
+// SAFETY: This implementation is only used in single-threaded builds (cfg check),
+// where we guarantee only one thread accesses the TT at a time.
+unsafe impl Sync for LocalTranspositionTable {}
+
+impl LocalTranspositionTable {
     /// Create a new TT with approximately `size_mb` megabytes of storage.
     /// For WASM builds, the size is capped at 64MB to avoid browser memory limits.
     pub fn new(size_mb: usize) -> Self {
@@ -357,11 +264,11 @@ impl TranspositionTable {
             cap_pow2 *= 2;
         }
 
-        TranspositionTable {
-            buckets: vec![TTBucket::empty(); cap_pow2],
+        LocalTranspositionTable {
+            buckets: UnsafeCell::new(vec![TTBucket::empty(); cap_pow2]),
             mask: cap_pow2 - 1,
-            generation: 1, // Start at 1 so 0 indicates empty
-            used: 0,
+            generation: UnsafeCell::new(1), // Start at 1 so 0 indicates empty
+            used: UnsafeCell::new(0),
         }
     }
 
@@ -374,13 +281,14 @@ impl TranspositionTable {
     /// Number of buckets in the table
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.buckets.len() * ENTRIES_PER_BUCKET
+        let buckets = unsafe { &*self.buckets.get() };
+        buckets.len() * ENTRIES_PER_BUCKET
     }
 
     /// Number of entries currently stored
     #[inline]
     pub fn used_entries(&self) -> usize {
-        self.used
+        unsafe { *self.used.get() }
     }
 
     /// Fill percentage in permille (0-1000)
@@ -390,7 +298,7 @@ impl TranspositionTable {
         if capacity == 0 {
             return 0;
         }
-        ((self.used as u64 * 1000) / capacity as u64) as u32
+        ((self.used_entries() as u64 * 1000) / capacity as u64) as u32
     }
 
     /// Calculate bucket index from hash
@@ -400,26 +308,18 @@ impl TranspositionTable {
     }
 
     /// Prefetch the TT bucket for the given hash into L1 cache.
-    /// This should be called BEFORE making a move, so the TT entry
-    /// for the child position is already in cache when we probe it.
-    ///
-    /// On x86_64: uses _mm_prefetch with _MM_HINT_T0 (L1 cache)
-    /// On other: no-op
     #[inline]
     #[cfg(all(target_arch = "x86_64", not(target_arch = "wasm32")))]
     pub fn prefetch_entry(&self, hash: u64) {
         use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
         let idx = self.bucket_index(hash);
-        let ptr = self.buckets.as_ptr().wrapping_add(idx) as *const i8;
+        let buckets = unsafe { &*self.buckets.get() };
+        let ptr = buckets.as_ptr().wrapping_add(idx) as *const i8;
         // SAFETY: ptr points into a valid, allocated slice
         unsafe { _mm_prefetch(ptr, _MM_HINT_T0) };
     }
 
     /// Probe the TT for a position.
-    ///
-    /// Returns `Some((score, static_eval, best_move, is_pv))` where:
-    /// - If `score` is usable for cutoff (not `INFINITY + 1`), use it directly.
-    /// - If `score == INFINITY + 1`, only the move and is_pv are usable (for ordering and search context).
     pub fn probe(&self, params: &TTProbeParams) -> Option<(i32, i32, Option<Move>, bool)> {
         let hash = params.hash;
         let alpha = params.alpha;
@@ -430,7 +330,9 @@ impl TranspositionTable {
         let rule_limit = params.rule_limit;
 
         let idx = self.bucket_index(hash);
-        let bucket = &self.buckets[idx];
+        // SAFETY: Single-threaded build implied by module import
+        let buckets = unsafe { &*self.buckets.get() };
+        let bucket = &buckets[idx];
 
         // Search all entries in the bucket for a match
         for entry in &bucket.entries {
@@ -468,15 +370,14 @@ impl TranspositionTable {
     }
 
     /// Probe the TT for Singular Extension data.
-    /// Returns raw entry data without applying cutoff logic.
-    /// Returns `Some((flag, depth, score, move))` if a matching entry exists.
     pub fn probe_for_singular(
         &self,
         hash: u64,
         ply: usize,
     ) -> Option<(TTFlag, u8, i32, i32, Option<Move>, bool)> {
         let idx = self.bucket_index(hash);
-        let bucket = &self.buckets[idx];
+        let buckets = unsafe { &*self.buckets.get() };
+        let bucket = &buckets[idx];
 
         for entry in &bucket.entries {
             if entry.key != hash || entry.is_empty() {
@@ -505,11 +406,8 @@ impl TranspositionTable {
     }
 
     /// Store an entry in the TT.
-    ///
-    /// Uses a smart replacement strategy within the bucket:
-    /// 1. If we find our position, always update it
-    /// 2. Otherwise, find the least valuable
-    pub fn store(&mut self, params: &TTStoreParams) {
+    /// Uses interior mutability via UnsafeCell.
+    pub fn store(&self, params: &TTStoreParams) {
         let hash = params.hash;
         let depth = params.depth;
         let flag = params.flag;
@@ -523,8 +421,17 @@ impl TranspositionTable {
         let adjusted_score = value_to_tt(score, ply);
 
         let idx = self.bucket_index(hash);
-        let generation = self.generation;
-        let bucket = &mut self.buckets[idx];
+
+        // SAFETY: Single-threaded build only
+        let (generation, buckets, used_ptr) = unsafe {
+            (
+                *self.generation.get(),
+                &mut *self.buckets.get(),
+                self.used.get(),
+            )
+        };
+
+        let bucket = &mut buckets[idx];
 
         // Find the best slot to use (search for existing entry or worst victim)
         let mut replace_idx = 0;
@@ -564,7 +471,7 @@ impl TranspositionTable {
                     || depth == 0
                 {
                     if entry.is_empty() {
-                        self.used += 1;
+                        unsafe { *used_ptr += 1 };
                     }
                     *entry = TTEntry {
                         key: hash,
@@ -608,7 +515,7 @@ impl TranspositionTable {
         // Replace if new entry is more valuable OR victim is empty/aged
         if new_score >= worst_score {
             if bucket.entries[replace_idx].is_empty() {
-                self.used += 1;
+                unsafe { *used_ptr += 1 };
             }
             bucket.entries[replace_idx] = new_entry;
         }
@@ -643,21 +550,25 @@ impl TranspositionTable {
     }
 
     /// Increment the generation counter (call at the start of each search from root)
-    pub fn increment_age(&mut self) {
-        // Wrap at 31 (5 bits)
-        self.generation = (self.generation + 1) & 0x1F;
-        if self.generation == 0 {
-            self.generation = 1; // Keep 0 reserved for empty
+    pub fn increment_age(&self) {
+        let gen_ptr = self.generation.get();
+        unsafe {
+            // Wrap at 31 (5 bits)
+            let val = (*gen_ptr + 1) & 0x1F;
+            *gen_ptr = if val == 0 { 1 } else { val };
         }
     }
 
     /// Clear the entire table
-    pub fn clear(&mut self) {
-        for bucket in &mut self.buckets {
+    pub fn clear(&self) {
+        let buckets = unsafe { &mut *self.buckets.get() };
+        for bucket in buckets {
             *bucket = TTBucket::empty();
         }
-        self.generation = 1;
-        self.used = 0;
+        unsafe {
+            *self.generation.get() = 1;
+            *self.used.get() = 0;
+        }
     }
 }
 
@@ -697,7 +608,7 @@ mod tests {
 
     #[test]
     fn test_tt_basic_operations() {
-        let mut tt = TranspositionTable::new(1); // 1 MB table
+        let tt = LocalTranspositionTable::new(1); // 1 MB table
 
         // Store and probe
         let hash = 0x123456789ABCDEF0u64;
