@@ -128,8 +128,15 @@ fn evaluate_pieces_confined(
 
         match piece.piece_type() {
             PieceType::Rook => {
-                piece_score +=
-                    base::evaluate_rook(game, *x, *y, piece.color(), white_king, black_king);
+                piece_score += base::evaluate_rook(
+                    game,
+                    *x,
+                    *y,
+                    piece.color(),
+                    white_king,
+                    black_king,
+                    base::MAX_PHASE,
+                );
 
                 // Bonus for rook invading enemy territory (behind their obstacles)
                 let in_enemy_territory = if is_white { *y >= 8 } else { *y <= 1 };

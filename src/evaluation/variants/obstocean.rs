@@ -53,12 +53,14 @@ fn evaluate_inner(game: &GameState) -> i32 {
         let v = match p.piece_type() {
             PieceType::Pawn => eval_pawn(*x, *y, p.color(), game),
             PieceType::Rook | PieceType::Chancellor | PieceType::Amazon => {
-                base::evaluate_rook(game, *x, *y, p.color(), &wk, &bk)
+                base::evaluate_rook(game, *x, *y, p.color(), &wk, &bk, base::MAX_PHASE)
             }
             PieceType::Queen | PieceType::RoyalQueen => {
-                base::evaluate_queen(game, *x, *y, p.color(), &wk, &bk)
+                base::evaluate_queen(game, *x, *y, p.color(), &wk, &bk, base::MAX_PHASE)
             }
-            PieceType::Bishop => base::evaluate_bishop(game, *x, *y, p.color(), &wk, &bk),
+            PieceType::Bishop => {
+                base::evaluate_bishop(game, *x, *y, p.color(), &wk, &bk, base::MAX_PHASE)
+            }
             _ => 0, // Knights get NO bonus - just material value
         };
 
