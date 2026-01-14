@@ -39,6 +39,7 @@ pub struct StoreContext {
     pub depth: usize,
     pub flag: crate::search::tt::TTFlag,
     pub score: i32,
+    pub static_eval: i32,
     pub is_pv: bool,
     pub best_move: Option<Move>,
     pub ply: usize,
@@ -142,15 +143,10 @@ pub enum NodeType {
     All,
 }
 
-// ============================================================================
-// Tunable search parameters - accessed via param accessor functions
-// ============================================================================
 pub mod params;
-
 mod tt;
 pub use tt::{TTEntry, TTFlag, TTProbeParams, TTStoreParams, TranspositionTable};
 
-// Shared TT for Lazy SMP - uses SharedArrayBuffer from JavaScript
 // Shared TT for Lazy SMP - uses SharedArrayBuffer from JavaScript
 #[cfg(feature = "multithreading")]
 mod shared_tt;
@@ -254,7 +250,7 @@ pub fn create_work_queue_view() -> Option<SharedWorkQueue> {
 pub fn probe_tt_with_shared(
     searcher: &Searcher,
     ctx: &ProbeContext,
-) -> Option<(i32, Option<Move>, bool)> {
+) -> Option<(i32, i32, Option<Move>, bool)> {
     let hash = ctx.hash;
     let alpha = ctx.alpha;
     let beta = ctx.beta;
@@ -292,6 +288,7 @@ pub fn store_tt_with_shared(searcher: &mut Searcher, ctx: &StoreContext) {
     let depth = ctx.depth;
     let flag = ctx.flag;
     let score = ctx.score;
+    let static_eval = ctx.static_eval;
     let best_move = ctx.best_move;
     let ply = ctx.ply;
     // On WASM with shared TT configured, use SharedTTView
@@ -312,9 +309,11 @@ pub fn store_tt_with_shared(searcher: &mut Searcher, ctx: &StoreContext) {
                     depth,
                     shared_flag,
                     score,
+                    static_eval,
                     best_move.as_ref(),
                     ply,
                     0, // generation - we use 0 for now since all workers share
+                    ctx.is_pv,
                 );
             }
             return;
@@ -327,6 +326,7 @@ pub fn store_tt_with_shared(searcher: &mut Searcher, ctx: &StoreContext) {
         depth,
         flag,
         score,
+        static_eval,
         is_pv: ctx.is_pv,
         best_move,
         ply,
@@ -1857,7 +1857,7 @@ fn negamax_root(
     // Probe TT for best move from previous search (uses shared TT if configured)
     // Pass half-move clock directly for score adjustment:
     let rule50_count = game.halfmove_clock;
-    if let Some((_, best, _)) = probe_tt_with_shared(
+    if let Some((_, _, best, _)) = probe_tt_with_shared(
         searcher,
         &ProbeContext {
             hash,
@@ -2022,6 +2022,7 @@ fn negamax_root(
             depth,
             flag: tt_flag,
             score: best_score,
+            static_eval: INFINITY + 1, // Not computed at root normally, or already stored
             is_pv: true,
             best_move,
             ply: 0,
@@ -2120,7 +2121,8 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     let rule50_count = game.halfmove_clock;
     // Capture tt_is_pv from probe
     let mut tt_is_pv = false;
-    if let Some((score, best, is_pv_ret)) = probe_tt_with_shared(
+    let mut tt_eval = INFINITY + 1;
+    if let Some((score, eval, best, is_pv_ret)) = probe_tt_with_shared(
         searcher,
         &ProbeContext {
             hash,
@@ -2134,10 +2136,11 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     ) {
         tt_move = best;
         tt_value = Some(score);
+        tt_eval = eval;
         tt_is_pv = is_pv_ret;
 
         // Get TT depth for qsearch extension decision
-        if let Some((_, d, _, _, _)) = searcher.tt.probe_for_singular(hash, ply) {
+        if let Some((_, d, _, _, _, _)) = searcher.tt.probe_for_singular(hash, ply) {
             tt_depth = d;
         }
         // In non-PV nodes, use TT cutoff if valid score returned
@@ -2167,7 +2170,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     };
 
     let (mut static_eval, raw_eval) = if in_check {
-        // When in check, use previous ply's evaluation (like Stockfish)
+        // When in check, use previous ply's evaluation
         let prev_eval = if ply >= 2 {
             searcher.eval_stack[ply - 2]
         } else {
@@ -2175,7 +2178,27 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         };
         (prev_eval, prev_eval)
     } else {
-        let raw = evaluate(game);
+        // Use stored TT evaluation if available, otherwise compute it
+        let mut raw = tt_eval;
+        if raw == INFINITY + 1 {
+            raw = evaluate(game);
+
+            // Store the computed evaluation in TT immediately
+            store_tt_with_shared(
+                searcher,
+                &StoreContext {
+                    hash,
+                    depth: 0,
+                    flag: TTFlag::None,
+                    score: 0,
+                    static_eval: raw,
+                    is_pv: tt_is_pv,
+                    best_move: tt_move,
+                    ply,
+                },
+            );
+        }
+
         let adjusted = searcher.adjusted_eval(game, raw, prev_move_idx);
         (adjusted, raw)
     };
@@ -2186,7 +2209,6 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             if !is_decisive(tt_val) {
                 // If TT value > eval and has lower bound, or TT value < eval and has upper bound
                 // we can use it as a better position evaluation
-                // Note: TT flags already checked during probe, so we just use the value
                 static_eval = tt_val;
             }
         }
@@ -2390,15 +2412,19 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             }
 
             if val >= prob_cut_beta {
-                searcher.tt.store(&crate::search::tt::TTStoreParams {
-                    hash,
-                    depth: prob_cut_depth + 1,
-                    flag: TTFlag::LowerBound,
-                    score: val,
-                    is_pv: false,
-                    best_move: Some(m),
-                    ply,
-                });
+                store_tt_with_shared(
+                    searcher,
+                    &StoreContext {
+                        hash,
+                        depth: prob_cut_depth + 1,
+                        flag: TTFlag::LowerBound,
+                        score: val,
+                        static_eval: raw_eval,
+                        is_pv: false,
+                        best_move: Some(m),
+                        ply,
+                    },
+                );
 
                 // Only return if not decisive, adjust value
                 if !is_decisive(val) {
@@ -2412,7 +2438,8 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     // This avoids searching positions where we already know there's a good move
     {
         let small_prob_cut_beta = beta + low_depth_probcut_margin();
-        if let Some((tt_flag, tt_depth, tt_score, _, _)) = searcher.tt.probe_for_singular(hash, ply)
+        if let Some((tt_flag, tt_depth, tt_score, _, _, _)) =
+            searcher.tt.probe_for_singular(hash, ply)
         {
             if (tt_flag == TTFlag::LowerBound || tt_flag == TTFlag::Exact)
                 && tt_depth as usize >= depth.saturating_sub(4)
@@ -2440,7 +2467,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
     let se_conditions = if depth >= 6 && !in_check {
         tt_move.as_ref().and_then(|_| {
             searcher.tt.probe_for_singular(hash, ply).and_then(
-                |(tt_flag, tt_depth, tt_score, _, _)| {
+                |(tt_flag, tt_depth, tt_score, _, _, _)| {
                     if (tt_flag == TTFlag::LowerBound || tt_flag == TTFlag::Exact)
                         && tt_depth as usize >= depth.saturating_sub(3)
                         && !is_decisive(tt_score)
@@ -3116,6 +3143,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             depth,
             flag: tt_flag,
             score: best_score,
+            static_eval: raw_eval,
             is_pv,
             best_move,
             ply,
@@ -3932,6 +3960,7 @@ mod tests {
             depth,
             flag: crate::search::tt::TTFlag::Exact,
             score,
+            static_eval: INFINITY + 1,
             is_pv: true,
             best_move: Some(best_move),
             ply: 0,
@@ -3949,7 +3978,7 @@ mod tests {
             rule_limit: 100,
         });
         assert!(result.is_some());
-        let (probed_score, probed_move, _) = result.unwrap();
+        let (probed_score, _, probed_move, _) = result.unwrap();
         assert_eq!(probed_score, score);
         assert!(probed_move.is_some());
         assert_eq!(probed_move.unwrap().from.x, 0);

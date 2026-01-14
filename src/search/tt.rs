@@ -37,6 +37,7 @@ pub struct TTStoreParams {
     pub depth: usize,
     pub flag: TTFlag,
     pub score: i32,
+    pub static_eval: i32,
     pub is_pv: bool,
     pub best_move: Option<Move>,
     pub ply: usize,
@@ -231,13 +232,14 @@ pub struct TTEntry {
     key: u64,
     /// Score from the search (with mate score adjustment for storage)
     score: i32,
+    /// Static evaluation of the position
+    eval: i32,
     /// Search depth that produced this result
     depth: u8,
     /// Packed: generation (upper 6 bits) + bound type (lower 2 bits)
     gen_bound: u8,
-    /// Padding to reach 64 bytes (8+4+1+1+10+40 = 64)
-    /// Also ensures alignment if needed.
-    _padding: [u8; 10],
+    /// Padding to reach 64 bytes (8+4+4+1+1+6+40 = 64)
+    _padding: [u8; 6],
     /// Best move found (or sentinel for none)
     tt_move: TTMove,
 }
@@ -249,9 +251,10 @@ impl TTEntry {
         TTEntry {
             key: 0,
             score: 0,
+            eval: INFINITY + 1, // Use INFINITY + 1 as "None"
             depth: 0,
             gen_bound: 0,
-            _padding: [0; 10],
+            _padding: [0; 6],
             tt_move: TTMove::none(),
         }
     }
@@ -414,10 +417,10 @@ impl TranspositionTable {
 
     /// Probe the TT for a position.
     ///
-    /// Returns `Some((score, best_move, is_pv))` where:
+    /// Returns `Some((score, static_eval, best_move, is_pv))` where:
     /// - If `score` is usable for cutoff (not `INFINITY + 1`), use it directly.
     /// - If `score == INFINITY + 1`, only the move and is_pv are usable (for ordering and search context).
-    pub fn probe(&self, params: &TTProbeParams) -> Option<(i32, Option<Move>, bool)> {
+    pub fn probe(&self, params: &TTProbeParams) -> Option<(i32, i32, Option<Move>, bool)> {
         let hash = params.hash;
         let alpha = params.alpha;
         let beta = params.beta;
@@ -453,12 +456,12 @@ impl TranspositionTable {
                 };
 
                 if let Some(s) = usable_score {
-                    return Some((s, best_move, entry.is_pv()));
+                    return Some((s, entry.eval, best_move, entry.is_pv()));
                 }
             }
 
-            // Depth insufficient or bounds don't allow cutoff, but move is still useful
-            return Some((INFINITY + 1, best_move, entry.is_pv()));
+            // Depth insufficient or bounds don't allow cutoff, but move and evaluation are still useful
+            return Some((INFINITY + 1, entry.eval, best_move, entry.is_pv()));
         }
 
         None
@@ -471,7 +474,7 @@ impl TranspositionTable {
         &self,
         hash: u64,
         ply: usize,
-    ) -> Option<(TTFlag, u8, i32, Option<Move>, bool)> {
+    ) -> Option<(TTFlag, u8, i32, i32, Option<Move>, bool)> {
         let idx = self.bucket_index(hash);
         let bucket = &self.buckets[idx];
 
@@ -492,6 +495,7 @@ impl TranspositionTable {
                 entry.flag(),
                 entry.depth,
                 score,
+                entry.eval,
                 entry.best_move(),
                 entry.is_pv(),
             ));
@@ -510,6 +514,7 @@ impl TranspositionTable {
         let depth = params.depth;
         let flag = params.flag;
         let score = params.score;
+        let static_eval = params.static_eval;
         let is_pv = params.is_pv;
         let best_move = params.best_move;
         let ply = params.ply;
@@ -536,16 +541,27 @@ impl TranspositionTable {
                     entry.tt_move
                 };
 
+                // Preserve the existing evaluation if no new evaluation is provided:
+                let eval_to_store = if static_eval != INFINITY + 1 {
+                    static_eval
+                } else {
+                    entry.eval
+                };
+
                 // Replacement condition for existing entries:
                 // PV bonus = +2 for exact bounds, threshold = old_depth - 4
                 let pv_bonus = if flag == TTFlag::Exact || is_pv { 2 } else { 0 };
                 let new_adjusted_depth = depth as i32 + pv_bonus;
                 let old_threshold = entry.depth as i32 - 4;
 
-                // Replace if: exact bound, or new depth high enough, or entry is aged
+                // Replace if: exact bound, or new depth high enough, or entry is aged,
+                // or if we're just updating the evaluation (DEPTH_UNSEARCHED)
                 // 5-bit generation wrap check
                 let relative_age = (generation.wrapping_sub(entry.generation())) & 0x1F;
-                if flag == TTFlag::Exact || new_adjusted_depth > old_threshold || relative_age != 0
+                if flag == TTFlag::Exact
+                    || new_adjusted_depth > old_threshold
+                    || relative_age != 0
+                    || depth == 0
                 {
                     if entry.is_empty() {
                         self.used += 1;
@@ -555,7 +571,8 @@ impl TranspositionTable {
                         depth: depth as u8,
                         gen_bound: TTEntry::pack_gen_bound(generation, is_pv, flag),
                         score: adjusted_score,
-                        _padding: [0; 10],
+                        eval: eval_to_store,
+                        _padding: [0; 6],
                         tt_move: move_to_store,
                     };
                 } else if entry.depth >= 5 && entry.flag() != TTFlag::Exact {
@@ -580,7 +597,8 @@ impl TranspositionTable {
             depth: depth as u8,
             gen_bound: TTEntry::pack_gen_bound(generation, is_pv, flag),
             score: adjusted_score,
-            _padding: [0; 10],
+            eval: static_eval,
+            _padding: [0; 6],
             tt_move: best_move.as_ref().map_or(TTMove::none(), TTMove::from_move),
         };
 
@@ -688,6 +706,7 @@ mod tests {
             depth: 5,
             flag: TTFlag::Exact,
             score: 100,
+            static_eval: 90,
             is_pv: true,
             best_move: None,
             ply: 0,
@@ -703,8 +722,9 @@ mod tests {
             rule_limit: 100,
         });
         assert!(result.is_some());
-        let (score, _, _) = result.unwrap();
+        let (score, eval, _, _) = result.unwrap();
         assert_eq!(score, 100);
+        assert_eq!(eval, 90);
     }
 
     #[test]
@@ -722,9 +742,10 @@ mod tests {
                 let entry_pv = TTEntry {
                     key: 0,
                     score: 0,
+                    eval: 0,
                     depth: 0,
                     gen_bound: packed_pv,
-                    _padding: [0; 10],
+                    _padding: [0; 6],
                     tt_move: TTMove::none(),
                 };
                 assert_eq!(entry_pv.generation(), r#gen & 0x1F);
@@ -736,9 +757,10 @@ mod tests {
                 let entry_nopv = TTEntry {
                     key: 0,
                     score: 0,
+                    eval: 0,
                     depth: 0,
                     gen_bound: packed_nopv,
-                    _padding: [0; 10],
+                    _padding: [0; 6],
                     tt_move: TTMove::none(),
                 };
                 assert_eq!(entry_nopv.generation(), r#gen & 0x1F);

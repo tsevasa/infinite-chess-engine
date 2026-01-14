@@ -19,7 +19,7 @@ use crate::moves::Move;
 use super::{INFINITY, MATE_SCORE};
 
 /// Number of atomic u64s per entry
-const WORDS_PER_ENTRY: usize = 3;
+const WORDS_PER_ENTRY: usize = 4;
 
 /// Entries per bucket for collision handling
 const ENTRIES_PER_BUCKET: usize = 2;
@@ -132,6 +132,12 @@ impl SharedTT {
             | ((score as u32) as u64)
     }
 
+    /// Pack entry word 1: eval | padding
+    #[inline]
+    fn pack_word1(eval: i32) -> u64 {
+        (eval as u32) as u64
+    }
+
     /// Unpack word 0
     #[inline]
     fn unpack_word0(w: u64) -> (u16, u8, u8, i32) {
@@ -140,6 +146,12 @@ impl SharedTT {
         let gen_bound = (w >> 32) as u8;
         let score = w as i32;
         (key16, depth, gen_bound, score)
+    }
+
+    /// Unpack word 1
+    #[inline]
+    fn unpack_word1(w: u64) -> i32 {
+        w as i32
     }
 
     /// Pack move into two words (for i64 coordinates)
@@ -213,7 +225,7 @@ impl SharedTT {
         ply: usize,
         rule50_count: u32,
         rule_limit: i32,
-    ) -> Option<(i32, Option<Move>, bool)> {
+    ) -> Option<(i32, i32, Option<Move>, bool)> {
         let bucket_idx = self.bucket_index(hash);
         let offset = self.bucket_offset(bucket_idx);
         let key16 = Self::key16(hash);
@@ -225,18 +237,20 @@ impl SharedTT {
             let w0 = self.data[base].load(Ordering::Relaxed);
             let w1 = self.data[base + 1].load(Ordering::Relaxed);
             let w2 = self.data[base + 2].load(Ordering::Relaxed);
+            let w3 = self.data[base + 3].load(Ordering::Relaxed);
 
             if w0 == 0 {
                 continue; // Empty entry
             }
 
-            let (stored_key16, stored_depth, gen_bound, mut score) = Self::unpack_word0(w0);
+            let (stored_key16, stored_depth, gen_bound, score) = Self::unpack_word0(w0);
+            let eval = Self::unpack_word1(w1);
 
             if stored_key16 != key16 {
                 continue; // Hash mismatch
             }
 
-            let best_move = Self::unpack_move(w1, w2);
+            let best_move = Self::unpack_move(w2, w3);
             let flag = SharedTTFlag::from_u8(gen_bound);
 
             // Adjust score from TT to search value, handling 50-move rule
@@ -254,13 +268,13 @@ impl SharedTT {
 
                 if let Some(s) = usable_score {
                     let is_pv = (gen_bound & 0b100) != 0;
-                    return Some((s, best_move, is_pv));
+                    return Some((s, eval, best_move, is_pv));
                 }
             }
 
-            // Return move for ordering even if score not usable
+            // Return move and evaluation for ordering even if score not usable
             let is_pv = (gen_bound & 0b100) != 0;
-            return Some((INFINITY + 1, best_move, is_pv));
+            return Some((INFINITY + 1, eval, best_move, is_pv));
         }
 
         None
@@ -273,6 +287,7 @@ impl SharedTT {
         depth: usize,
         flag: SharedTTFlag,
         score: i32,
+        static_eval: i32,
         best_move: Option<&Move>,
         ply: usize,
         generation: u8,
@@ -292,7 +307,8 @@ impl SharedTT {
         let gen_bound = (generation << 3) | ((is_pv as u8) << 2) | (flag as u8);
 
         let w0 = Self::pack_word0(key16, depth as u8, gen_bound, adjusted_score);
-        let (w1, w2) = best_move.map_or_else(Self::pack_no_move, Self::pack_move);
+        let w1 = Self::pack_word1(static_eval);
+        let (w2, w3) = best_move.map_or_else(Self::pack_no_move, Self::pack_move);
 
         // Find best slot to replace
         let mut replace_idx = 0;
@@ -335,6 +351,7 @@ impl SharedTT {
         self.data[base].store(w0, Ordering::Relaxed);
         self.data[base + 1].store(w1, Ordering::Relaxed);
         self.data[base + 2].store(w2, Ordering::Relaxed);
+        self.data[base + 3].store(w3, Ordering::Relaxed);
     }
 
     /// Clear the table
@@ -440,7 +457,7 @@ impl SharedTTView {
         ply: usize,
         rule50_count: u32,
         rule_limit: i32,
-    ) -> Option<(i32, Option<Move>, bool)> {
+    ) -> Option<(i32, i32, Option<Move>, bool)> {
         let bucket_idx = self.bucket_index(hash);
         let base_offset = self.bucket_offset(bucket_idx);
         let key16 = SharedTT::key16(hash);
@@ -453,14 +470,16 @@ impl SharedTTView {
                 continue;
             }
 
-            let (stored_key16, stored_depth, gen_bound, mut score) = SharedTT::unpack_word0(w0);
+            let (stored_key16, stored_depth, gen_bound, score) = SharedTT::unpack_word0(w0);
             if stored_key16 != key16 {
                 continue;
             }
 
             let w1 = self.load_word(offset + 1);
             let w2 = self.load_word(offset + 2);
-            let best_move = SharedTT::unpack_move(w1, w2);
+            let w3 = self.load_word(offset + 3);
+            let eval = SharedTT::unpack_word1(w1);
+            let best_move = SharedTT::unpack_move(w2, w3);
             let flag = SharedTTFlag::from_u8(gen_bound);
 
             // Adjust score from TT to search value, handling 50-move rule
@@ -475,12 +494,12 @@ impl SharedTTView {
                 };
                 if let Some(s) = usable {
                     let is_pv = (gen_bound & 0b100) != 0;
-                    return Some((s, best_move, is_pv));
+                    return Some((s, eval, best_move, is_pv));
                 }
             }
 
             let is_pv = (gen_bound & 0b100) != 0;
-            return Some((INFINITY + 1, best_move, is_pv));
+            return Some((INFINITY + 1, eval, best_move, is_pv));
         }
 
         None
@@ -493,6 +512,7 @@ impl SharedTTView {
         depth: usize,
         flag: SharedTTFlag,
         score: i32,
+        static_eval: i32,
         best_move: Option<&Move>,
         ply: usize,
         generation: u8,
@@ -511,7 +531,8 @@ impl SharedTTView {
         let gen_bound = (generation << 3) | ((is_pv as u8) << 2) | (flag as u8);
 
         let w0 = SharedTT::pack_word0(key16, depth as u8, gen_bound, adjusted_score);
-        let (w1, w2) = best_move.map_or_else(SharedTT::pack_no_move, SharedTT::pack_move);
+        let w1 = SharedTT::pack_word1(static_eval);
+        let (w2, w3) = best_move.map_or_else(SharedTT::pack_no_move, SharedTT::pack_move);
 
         // Find replacement slot
         let mut replace_idx = 0;
@@ -552,6 +573,7 @@ impl SharedTTView {
         self.store_word(offset, w0);
         self.store_word(offset + 1, w1);
         self.store_word(offset + 2, w2);
+        self.store_word(offset + 3, w3);
     }
 
     /// Clear the shared TT
@@ -631,12 +653,13 @@ mod tests {
         let tt = SharedTT::new(1);
 
         let hash = 0x123456789ABCDEF0u64;
-        tt.store(hash, 5, SharedTTFlag::Exact, 100, None, 0, 1);
+        tt.store(hash, 5, SharedTTFlag::Exact, 100, 90, None, 0, 1, true);
 
-        let result = tt.probe(hash, -1000, 1000, 5, 0, 1);
+        let result = tt.probe(hash, -1000, 1000, 5, 0, 1, 100);
         assert!(result.is_some());
-        let (score, _) = result.unwrap();
+        let (score, eval, _, _) = result.unwrap();
         assert_eq!(score, 100);
+        assert_eq!(eval, 90);
     }
 
     #[test]

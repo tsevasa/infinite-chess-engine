@@ -279,7 +279,7 @@ fn negamax_root_noisy(
     let mut tt_move: Option<Move> = None;
 
     let rule50_count = game.halfmove_clock;
-    if let Some((_, best, _)) = super::probe_tt_with_shared(
+    if let Some((_, _, best, _)) = super::probe_tt_with_shared(
         searcher,
         &super::ProbeContext {
             hash,
@@ -426,6 +426,7 @@ fn negamax_root_noisy(
             depth,
             flag: tt_flag,
             score: best_score,
+            static_eval: INFINITY + 1,
             is_pv: true,
             best_move,
             ply: 0,
@@ -508,7 +509,8 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
     let rule50_count = game.halfmove_clock;
     // Capture tt_is_pv
     let mut tt_is_pv = false;
-    if let Some((score, best, is_pv_ret)) = super::probe_tt_with_shared(
+    let mut tt_eval = INFINITY + 1;
+    if let Some((score, eval, best, is_pv_ret)) = super::probe_tt_with_shared(
         searcher,
         &super::ProbeContext {
             hash,
@@ -522,6 +524,7 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
     ) {
         tt_move = best;
         tt_value = Some(score);
+        tt_eval = eval;
         tt_is_pv = is_pv_ret;
 
         let rule_limit = searcher.move_rule_limit as u32;
@@ -539,7 +542,27 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
     let (static_eval, raw_eval) = if must_escape {
         (-MATE_VALUE + ply as i32, -MATE_VALUE + ply as i32)
     } else {
-        let raw = evaluate(game);
+        // Use stored TT evaluation if available, otherwise compute it
+        let mut raw = tt_eval;
+        if raw == INFINITY + 1 {
+            raw = evaluate(game);
+
+            // Store the computed evaluation in TT immediately
+            super::store_tt_with_shared(
+                searcher,
+                &super::StoreContext {
+                    hash,
+                    depth: 0,
+                    flag: TTFlag::None,
+                    score: 0,
+                    static_eval: raw,
+                    is_pv: tt_is_pv,
+                    best_move: tt_move,
+                    ply,
+                },
+            );
+        }
+
         let prev_move_hash = if ply > 0 {
             let (from_hash, to_hash) = searcher.prev_move_stack[ply - 1];
             from_hash ^ to_hash
@@ -728,6 +751,7 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
                         depth: prob_cut_depth + 1,
                         flag: TTFlag::LowerBound,
                         score: val,
+                        static_eval: raw_eval,
                         is_pv: false,
                         best_move: Some(*m),
                         ply,
@@ -741,7 +765,7 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
     let se_conditions = if depth >= 6 && !in_check {
         tt_move.as_ref().and_then(|_| {
             searcher.tt.probe_for_singular(hash, ply).and_then(
-                |(tt_flag, tt_depth, tt_score, _, _)| {
+                |(tt_flag, tt_depth, tt_score, _, _, _)| {
                     let depth_val = tt_depth as usize;
                     if (tt_flag == TTFlag::LowerBound || tt_flag == TTFlag::Exact)
                         && depth_val >= depth.saturating_sub(3)
@@ -1139,6 +1163,7 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
             depth,
             flag: tt_flag,
             score: best_score,
+            static_eval: raw_eval,
             is_pv,
             best_move,
             ply: 0,
