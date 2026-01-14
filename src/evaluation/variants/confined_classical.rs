@@ -63,7 +63,6 @@ fn evaluate_inner(game: &GameState) -> i32 {
     }
 
     // Check if white is losing
-    // Check if white is losing
     if !mop_up_applied
         && let (Some(_scale), Some(wk)) = (
             crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::White),

@@ -1,4 +1,4 @@
-use crate::board::{Board, Coordinate, PieceType, PlayerColor};
+﻿use crate::board::{Board, Coordinate, PieceType, PlayerColor};
 use crate::game::GameState;
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
@@ -20,6 +20,71 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "eval_tuning")]
 use std::sync::RwLock;
+
+/// Tracer trait for evaluation components.
+/// Uses zero-cost abstraction with NoTrace for production.
+pub trait EvaluationTracer {
+    fn record(&mut self, term: &str, white: i32, black: i32);
+    fn is_active(&self) -> bool;
+}
+
+/// No-op tracer for production use.
+pub struct NoTrace;
+impl EvaluationTracer for NoTrace {
+    #[inline(always)]
+    fn record(&mut self, _term: &str, _white: i32, _black: i32) {}
+    #[inline(always)]
+    fn is_active(&self) -> bool {
+        false
+    }
+}
+
+/// Active tracer for debug output.
+#[derive(Default, Debug, Clone)]
+pub struct ActiveTrace {
+    pub rows: Vec<(String, i32, i32)>,
+}
+
+impl EvaluationTracer for ActiveTrace {
+    fn record(&mut self, term: &str, white: i32, black: i32) {
+        self.rows.push((term.to_string(), white, black));
+    }
+    fn is_active(&self) -> bool {
+        true
+    }
+}
+
+impl ActiveTrace {
+    pub fn print(&self) {
+        println!(
+            "\n{:<25} | {:>10} | {:>10} | {:>10}",
+            "Evaluation Term", "White", "Black", "Total"
+        );
+        println!("{:-<25}-+-{:-<10}-+-{:-<10}-+-{:-<10}", "", "", "", "");
+        let mut total_w = 0;
+        let mut total_b = 0;
+        for (term, w, b) in &self.rows {
+            total_w += w;
+            total_b += b;
+            println!(
+                "{:<25} | {:>10.2} | {:>10.2} | {:>10.2}",
+                term,
+                *w as f64 / 100.0,
+                *b as f64 / 100.0,
+                (*w - *b) as f64 / 100.0
+            );
+        }
+        println!("{:-<25}-+-{:-<10}-+-{:-<10}-+-{:-<10}", "", "", "", "");
+        println!(
+            "{:<25} | {:>10.2} | {:>10.2} | {:>10.2}",
+            "TOTAL",
+            total_w as f64 / 100.0,
+            total_b as f64 / 100.0,
+            (total_w - total_b) as f64 / 100.0
+        );
+        println!();
+    }
+}
 
 #[cfg(feature = "eval_tuning")]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -399,6 +464,13 @@ pub fn evaluate_lazy(game: &GameState) -> i32 {
     }
 }
 
+/// Perform a full evaluation with detailed tracing.
+pub fn debug_evaluate(game: &GameState) -> ActiveTrace {
+    let mut tracer = ActiveTrace::default();
+    evaluate_inner_traced(game, &mut tracer);
+    tracer
+}
+
 pub fn evaluate(game: &GameState) -> i32 {
     // Check for insufficient material draw
     match crate::evaluation::insufficient_material::evaluate_insufficient_material(game) {
@@ -415,7 +487,12 @@ pub fn evaluate(game: &GameState) -> i32 {
 
 /// Core evaluation logic - skips insufficient material check
 #[inline]
-fn evaluate_inner(game: &GameState) -> i32 {
+pub fn evaluate_inner(game: &GameState) -> i32 {
+    evaluate_inner_traced(game, &mut NoTrace)
+}
+
+/// Core evaluation logic with tracing support
+pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut T) -> i32 {
     // Start with material score
     let mut score = game.material_score;
 
@@ -430,7 +507,7 @@ fn evaluate_inner(game: &GameState) -> i32 {
     let black_pieces = game.black_piece_count.saturating_sub(game.black_pawn_count);
 
     // Call optimized single-pass pawn evaluation
-    let (pawn_score, white_has_promo, black_has_promo) = evaluate_pawns(game);
+    let (pawn_score, white_has_promo, black_has_promo) = evaluate_pawns_traced(game, tracer);
     score += pawn_score;
 
     let mut mop_up_applied = false;
@@ -445,13 +522,15 @@ fn evaluate_inner(game: &GameState) -> i32 {
     {
         // Need enemy king as target
         if let Some(bk) = &black_king {
-            score += crate::evaluation::mop_up::evaluate_mop_up_scaled(
+            let s = crate::evaluation::mop_up::evaluate_mop_up_scaled(
                 game,
                 white_king.as_ref(),
                 bk,
                 PlayerColor::White,
                 PlayerColor::Black,
             );
+            tracer.record("Mop-up", s, 0);
+            score += s;
             mop_up_applied = true;
         }
     }
@@ -467,23 +546,24 @@ fn evaluate_inner(game: &GameState) -> i32 {
     {
         // Need enemy king as target
         if let Some(wk) = &white_king {
-            score -= crate::evaluation::mop_up::evaluate_mop_up_scaled(
+            let s = crate::evaluation::mop_up::evaluate_mop_up_scaled(
                 game,
                 black_king.as_ref(),
                 wk,
                 PlayerColor::Black,
                 PlayerColor::White,
             );
+            tracer.record("Mop-up", 0, s);
+            score -= s;
             mop_up_applied = true;
         }
     }
 
-    // If mop-up wasn't applied, use normal positional evaluation
     if !mop_up_applied {
-        score += evaluate_pieces(game, &white_king, &black_king);
-        score += evaluate_king_safety(game, &white_king, &black_king);
-        score += evaluate_pawn_structure(game);
-        score += evaluate_threats(game);
+        score += evaluate_pieces_traced(game, &white_king, &black_king, tracer);
+        score += evaluate_king_safety_traced(game, &white_king, &black_king, tracer);
+        score += evaluate_pawn_structure_traced(game, tracer);
+        score += evaluate_threat_traced(game, tracer);
     }
 
     // Return from current player's perspective
@@ -501,7 +581,17 @@ pub fn evaluate_pieces(
     white_king: &Option<Coordinate>,
     black_king: &Option<Coordinate>,
 ) -> i32 {
-    let mut score: i32 = 0;
+    evaluate_pieces_traced(game, white_king, black_king, &mut NoTrace)
+}
+
+pub fn evaluate_pieces_traced<T: EvaluationTracer>(
+    game: &GameState,
+    white_king: &Option<Coordinate>,
+    black_king: &Option<Coordinate>,
+    tracer: &mut T,
+) -> i32 {
+    let mut w_activity: i32 = 0;
+    let mut b_activity: i32 = 0;
 
     // BITBOARD: Pass 1 - Single metadata collection
     let mut white_undeveloped = 0;
@@ -918,29 +1008,35 @@ pub fn evaluate_pieces(
             }
 
             if piece.color() == PlayerColor::White {
-                score += piece_score;
+                w_activity += piece_score;
             } else {
-                score -= piece_score;
+                b_activity += piece_score;
             }
         }
     }
 
+    let mut w_pair_bonus = 0;
+    let mut b_pair_bonus = 0;
+
     if white_bishops >= 2 {
-        score += BISHOP_PAIR_BONUS;
+        w_pair_bonus += BISHOP_PAIR_BONUS;
         bump_feat!(bishop_pair_bonus, 1);
         if white_bishop_colors.0 && white_bishop_colors.1 {
-            score += 20;
+            w_pair_bonus += 20;
         }
     }
     if black_bishops >= 2 {
-        score -= BISHOP_PAIR_BONUS;
+        b_pair_bonus += BISHOP_PAIR_BONUS;
         bump_feat!(bishop_pair_bonus, -1);
         if black_bishop_colors.0 && black_bishop_colors.1 {
-            score -= 20;
+            b_pair_bonus += 20;
         }
     }
 
-    score
+    tracer.record("Piece: Activity", w_activity, b_activity);
+    tracer.record("Piece: Bishop Pair", w_pair_bonus, b_pair_bonus);
+
+    (w_activity + w_pair_bonus) - (b_activity + b_pair_bonus)
 }
 
 pub fn evaluate_rook(
@@ -1198,8 +1294,15 @@ pub fn evaluate_bishop(
 /// Evaluate all pawn-related positional terms in a single pass.
 /// Includes advancement, doubled, passed, phalanx, connected pawns.
 /// Pawns past promotion rank ONLY get PAWN_PAST_PROMO_PENALTY - no other evaluation.
-#[inline(always)]
-fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
+#[inline]
+pub fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
+    evaluate_pawns_traced(game, &mut NoTrace)
+}
+
+pub fn evaluate_pawns_traced<T: EvaluationTracer>(
+    game: &GameState,
+    tracer: &mut T,
+) -> (i32, bool, bool) {
     if game.white_pawn_count == 0 && game.black_pawn_count == 0 {
         return (0, false, false);
     }
@@ -1235,8 +1338,10 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
     let mut w_to_find = game.white_pawn_count as i32;
     let mut b_to_find = game.black_pawn_count as i32;
 
-    let mut bonus_score = 0; // Scaled terms (advancement)
-    let mut penalty_score = 0; // Unscaled terms (structural worthless penalty)
+    let mut w_bonus_score = 0; // Scaled terms White
+    let mut b_bonus_score = 0; // Scaled terms Black
+    let mut w_penalty_score = 0; // Unscaled terms White
+    let mut b_penalty_score = 0; // Unscaled terms Black
 
     for (_cx, cy, tile) in game.board.tiles.iter() {
         let occ_pawns = tile.occ_pawns;
@@ -1256,17 +1361,14 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
                 let y = base_y + (idx / 8) as i64;
 
                 if y >= w_promo {
-                    // Worthless if already past promotion - apply unscaled penalty
-                    // to ensure 10x value reduction regardless of phase.
-                    penalty_score -= PAWN_PAST_PROMO_PENALTY;
+                    w_penalty_score -= PAWN_PAST_PROMO_PENALTY;
                 } else {
                     let dist = w_promo - y;
                     if dist > PAWN_FULL_VALUE_THRESHOLD {
-                        bonus_score -= PAWN_FAR_FROM_PROMO_PENALTY;
+                        w_bonus_score -= PAWN_FAR_FROM_PROMO_PENALTY;
                     } else {
-                        bonus_score += (PAWN_FULL_VALUE_THRESHOLD - dist) as i32 * 4;
+                        w_bonus_score += (PAWN_FULL_VALUE_THRESHOLD - dist) as i32 * 4;
                     }
-                    // Track most advanced for special bonus
                     if y > white_max_y {
                         white_max_y = y;
                     }
@@ -1284,15 +1386,14 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
                 let y = base_y + (idx / 8) as i64;
 
                 if y <= b_promo {
-                    penalty_score += PAWN_PAST_PROMO_PENALTY;
+                    b_penalty_score -= PAWN_PAST_PROMO_PENALTY;
                 } else {
                     let dist = y - b_promo;
                     if dist > PAWN_FULL_VALUE_THRESHOLD {
-                        bonus_score += PAWN_FAR_FROM_PROMO_PENALTY;
+                        b_bonus_score -= PAWN_FAR_FROM_PROMO_PENALTY;
                     } else {
-                        bonus_score -= (PAWN_FULL_VALUE_THRESHOLD - dist) as i32 * 4;
+                        b_bonus_score += (PAWN_FULL_VALUE_THRESHOLD - dist) as i32 * 4;
                     }
-                    // Track most advanced
                     if y < black_min_y {
                         black_min_y = y;
                     }
@@ -1308,10 +1409,9 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
     let white_has_promo = white_max_y != i64::MIN;
     let black_has_promo = black_min_y != i64::MAX;
 
-    // Apply special high-value promotion bonus for the single most advanced pawn
     if white_has_promo {
         let dist = w_promo - white_max_y;
-        bonus_score += if dist <= 1 {
+        w_bonus_score += if dist <= 1 {
             500
         } else if dist <= 2 {
             350
@@ -1321,7 +1421,7 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
     }
     if black_has_promo {
         let dist = black_min_y - b_promo;
-        bonus_score -= if dist <= 1 {
+        b_bonus_score += if dist <= 1 {
             500
         } else if dist <= 2 {
             350
@@ -1330,10 +1430,12 @@ fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
         };
     }
 
-    // Scale advancement bonuses by game phase, but keep structural penalties unscaled
-    let final_score = (bonus_score * multiplier_q / 100) + penalty_score;
+    let w_adv = (w_bonus_score * multiplier_q / 100) + w_penalty_score;
+    let b_adv = (b_bonus_score * multiplier_q / 100) + b_penalty_score;
 
-    (final_score, white_has_promo, black_has_promo)
+    tracer.record("Pawn Advancement", w_adv, b_adv);
+
+    (w_adv - b_adv, white_has_promo, black_has_promo)
 }
 
 // ==================== Fairy Piece Evaluation ====================
@@ -1456,16 +1558,28 @@ pub fn evaluate_king_safety(
     white_king: &Option<Coordinate>,
     black_king: &Option<Coordinate>,
 ) -> i32 {
-    let mut score: i32 = 0;
+    evaluate_king_safety_traced(game, white_king, black_king, &mut NoTrace)
+}
+
+pub fn evaluate_king_safety_traced<T: EvaluationTracer>(
+    game: &GameState,
+    white_king: &Option<Coordinate>,
+    black_king: &Option<Coordinate>,
+    tracer: &mut T,
+) -> i32 {
+    let mut w_safety: i32 = 0;
+    let mut b_safety: i32 = 0;
+    let mut w_attack: i32 = 0;
+    let mut b_attack: i32 = 0;
 
     // White king safety (defense penalty)
     if let Some(wk) = white_king {
-        score += evaluate_king_shelter(game, wk, PlayerColor::White);
+        w_safety += evaluate_king_shelter(game, wk, PlayerColor::White);
     }
 
     // Black king safety (defense penalty)
     if let Some(bk) = black_king {
-        score -= evaluate_king_shelter(game, bk, PlayerColor::Black);
+        b_safety += evaluate_king_shelter(game, bk, PlayerColor::Black);
     }
 
     // ATTACK BONUSES: bonus for our sliders threatening enemy king's open rays
@@ -1473,17 +1587,18 @@ pub fn evaluate_king_safety(
 
     // White attack potential against black king
     if let Some(bk) = black_king {
-        let attack_bonus = compute_attack_bonus(game, bk, PlayerColor::White);
-        score += attack_bonus;
+        w_attack += compute_attack_bonus(game, bk, PlayerColor::White);
     }
 
     // Black attack potential against white king
     if let Some(wk) = white_king {
-        let attack_bonus = compute_attack_bonus(game, wk, PlayerColor::Black);
-        score -= attack_bonus;
+        b_attack += compute_attack_bonus(game, wk, PlayerColor::Black);
     }
 
-    score
+    tracer.record("King: Shelter", w_safety, b_safety);
+    tracer.record("King: Attack", w_attack, b_attack);
+
+    (w_safety + w_attack) - (b_safety + b_attack)
 }
 
 /// Compute attack bonus for having sliders that can threaten open rays on enemy king
@@ -1968,11 +2083,21 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
     safety
 }
 
-// ==================== Pawn Structure ====================
-
 pub fn evaluate_pawn_structure(game: &GameState) -> i32 {
+    evaluate_pawn_structure_traced(game, &mut NoTrace)
+}
+
+pub fn evaluate_pawn_structure_traced<T: EvaluationTracer>(
+    game: &GameState,
+    tracer: &mut T,
+) -> i32 {
     // Check cache first using game's pawn_hash
     let pawn_hash = game.pawn_hash;
+
+    // Bypassing cache if tracer is active to ensure we get a full breakdown.
+    if tracer.is_active() {
+        return compute_pawn_structure_traced(game, tracer);
+    }
 
     let cached = PAWN_CACHE.with(|cache| cache.borrow().get(&pawn_hash).copied());
 
@@ -1981,7 +2106,7 @@ pub fn evaluate_pawn_structure(game: &GameState) -> i32 {
     }
 
     // Cache miss - compute pawn structure
-    let score = compute_pawn_structure(game);
+    let score = compute_pawn_structure_traced(game, tracer);
 
     // Store in cache (limit cache size to avoid unbounded growth)
     PAWN_CACHE.with(|cache| {
@@ -2001,8 +2126,13 @@ pub fn evaluate_pawn_structure(game: &GameState) -> i32 {
 }
 
 /// Core pawn structure computation. Called on cache miss.
-fn compute_pawn_structure(game: &GameState) -> i32 {
-    let mut score: i32 = 0;
+fn compute_pawn_structure_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut T) -> i32 {
+    let mut w_doubled = 0;
+    let mut b_doubled = 0;
+    let mut w_passed = 0;
+    let mut b_passed = 0;
+    let mut w_connected = 0;
+    let mut b_connected = 0;
 
     // Track pawns per file for each color
     let mut white_pawn_files: Vec<i64> = Vec::new(); // For inter-tile doubled pawn check
@@ -2057,7 +2187,7 @@ fn compute_pawn_structure(game: &GameState) -> i32 {
     white_pawn_files.sort();
     for &file in &white_pawn_files {
         if prev_file == Some(file) {
-            score -= DOUBLED_PAWN_PENALTY;
+            w_doubled -= DOUBLED_PAWN_PENALTY;
             bump_feat!(doubled_pawn_penalty, -1);
         }
         prev_file = Some(file);
@@ -2076,24 +2206,24 @@ fn compute_pawn_structure(game: &GameState) -> i32 {
 
         if is_passed {
             // Base bonus for passed pawn
-            score += 20;
+            w_passed += 20;
         }
 
         // Connected pawn bonus: check if there's a friendly pawn diagonally behind
         if is_connected_pawn(game, *wx, *wy, PlayerColor::White) {
-            score += CONNECTED_PAWN_BONUS;
+            w_connected += CONNECTED_PAWN_BONUS;
         }
     }
 
     // --- BLACK PAWNS ---
-    let mut prev_file: Option<i64> = None;
+    let mut prev_file_b: Option<i64> = None;
     black_pawn_files.sort();
     for &file in &black_pawn_files {
-        if prev_file == Some(file) {
-            score += DOUBLED_PAWN_PENALTY;
+        if prev_file_b == Some(file) {
+            b_doubled -= DOUBLED_PAWN_PENALTY;
             bump_feat!(doubled_pawn_penalty, 1);
         }
-        prev_file = Some(file);
+        prev_file_b = Some(file);
     }
 
     // Check passed pawns for Black
@@ -2108,24 +2238,35 @@ fn compute_pawn_structure(game: &GameState) -> i32 {
         }
 
         if is_passed {
-            score -= 20;
+            b_passed += 20;
         }
 
         // Connected pawn bonus: check if there's a friendly pawn diagonally behind
         if is_connected_pawn(game, *bx, *by, PlayerColor::Black) {
-            score -= CONNECTED_PAWN_BONUS;
+            b_connected += CONNECTED_PAWN_BONUS;
         }
     }
 
-    score
+    tracer.record("Pawn: Doubled", w_doubled.abs(), b_doubled.abs());
+    tracer.record("Pawn: Passed", w_passed, b_passed);
+    tracer.record("Pawn: Connected", w_connected, b_connected);
+
+    (w_doubled + w_passed + w_connected) - (b_doubled + b_passed + b_connected)
 }
 
 // ==================== Threat Evaluation ====================
 
 /// Evaluate threats: bonus for attacking higher-value pieces with lower-value pieces.
 /// Efficient on infinite boards - only checks direct attack squares for leapers (pawns, knights).
-fn evaluate_threats(game: &GameState) -> i32 {
-    let mut score: i32 = 0;
+pub fn evaluate_threats(game: &GameState) -> i32 {
+    evaluate_threat_traced(game, &mut NoTrace)
+}
+
+pub fn evaluate_threat_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut T) -> i32 {
+    let mut w_pawn_threats = 0;
+    let mut b_pawn_threats = 0;
+    let mut w_minor_threats = 0;
+    let mut b_minor_threats = 0;
 
     // Threat bonus constants (centipawns)
     const PAWN_THREATENS_MINOR: i32 = 25;
@@ -2169,7 +2310,6 @@ fn evaluate_threats(game: &GameState) -> i32 {
             let x = cx * 8 + (idx % 8) as i64;
             let y = cy * 8 + (idx / 8) as i64;
 
-            let sign = if color == PlayerColor::White { 1 } else { -1 };
             let enemy = if color == PlayerColor::White {
                 PlayerColor::Black
             } else {
@@ -2184,11 +2324,23 @@ fn evaluate_threats(game: &GameState) -> i32 {
                             if target.color() == enemy {
                                 let tv = get_piece_value(target.piece_type());
                                 if tv >= 600 {
-                                    score += sign * PAWN_THREATENS_QUEEN;
+                                    if color == PlayerColor::White {
+                                        w_pawn_threats += PAWN_THREATENS_QUEEN;
+                                    } else {
+                                        b_pawn_threats += PAWN_THREATENS_QUEEN;
+                                    }
                                 } else if tv >= 400 {
-                                    score += sign * PAWN_THREATENS_ROOK;
+                                    if color == PlayerColor::White {
+                                        w_pawn_threats += PAWN_THREATENS_ROOK;
+                                    } else {
+                                        b_pawn_threats += PAWN_THREATENS_ROOK;
+                                    }
                                 } else if tv >= 200 {
-                                    score += sign * PAWN_THREATENS_MINOR;
+                                    if color == PlayerColor::White {
+                                        w_pawn_threats += PAWN_THREATENS_MINOR;
+                                    } else {
+                                        b_pawn_threats += PAWN_THREATENS_MINOR;
+                                    }
                                 }
                             }
                         }
@@ -2201,9 +2353,17 @@ fn evaluate_threats(game: &GameState) -> i32 {
                                 let tv = get_piece_value(target.piece_type());
                                 let mv = get_piece_value(pt);
                                 if tv >= 600 && mv < 600 {
-                                    score += sign * MINOR_THREATENS_QUEEN;
+                                    if color == PlayerColor::White {
+                                        w_minor_threats += MINOR_THREATENS_QUEEN;
+                                    } else {
+                                        b_minor_threats += MINOR_THREATENS_QUEEN;
+                                    }
                                 } else if tv >= 400 && mv < 400 {
-                                    score += sign * MINOR_THREATENS_ROOK;
+                                    if color == PlayerColor::White {
+                                        w_minor_threats += MINOR_THREATENS_ROOK;
+                                    } else {
+                                        b_minor_threats += MINOR_THREATENS_ROOK;
+                                    }
                                 }
                             }
                         }
@@ -2214,7 +2374,10 @@ fn evaluate_threats(game: &GameState) -> i32 {
         }
     }
 
-    score
+    tracer.record("Threats: Pawn", w_pawn_threats, b_pawn_threats);
+    tracer.record("Threats: Minor", w_minor_threats, b_minor_threats);
+
+    (w_pawn_threats + w_minor_threats) - (b_pawn_threats + b_minor_threats)
 }
 
 pub fn count_pawns_on_file(game: &GameState, file: i64, color: PlayerColor) -> (i32, i32) {
