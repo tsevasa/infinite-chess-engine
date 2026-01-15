@@ -177,9 +177,6 @@ pub use zobrist::{
     pawn_key, pawn_special_right_key, piece_key,
 };
 
-mod noisy;
-pub use noisy::get_best_move_with_noise;
-
 // ============================================================================
 // TT Probe/Store (Dispatch wrapper)
 // ============================================================================
@@ -551,9 +548,6 @@ pub fn reset_search_state() {
     GLOBAL_SEARCHER.with(|cell| {
         *cell.borrow_mut() = None;
     });
-
-    let seed = (random() * 1.8446744073709552e19) as u64;
-    crate::search::noisy::reset_noise_seed(seed);
 
     // Clear pawn structure cache for new game
     crate::evaluation::base::clear_pawn_cache();
@@ -1057,23 +1051,39 @@ impl Searcher {
         }
     }
 
-    /// Format PV line as string
+    /// Format a score (cp or mate) as a string
+    fn format_score(&self, score: i32) -> String {
+        if score > MATE_SCORE {
+            let mate_in = (MATE_VALUE - score + 1) / 2;
+            format!("mate {}", mate_in)
+        } else if score < -MATE_SCORE {
+            let mate_in = (MATE_VALUE + score + 1) / 2;
+            format!("mate -{}", mate_in)
+        } else {
+            format!("cp {}", score)
+        }
+    }
+
+    /// Format a single PV line (Vec<Move>) as a string
+    fn format_pv_line(&self, pv: &[Move]) -> String {
+        pv.iter()
+            .map(|m| {
+                let promo = m.promotion.map_or("", |p| p.to_site_code());
+                format!("{},{}->{},{}{}", m.from.x, m.from.y, m.to.x, m.to.y, promo)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Format current searcher's PV as string
     pub fn format_pv(&self) -> String {
-        let mut pv_str = String::new();
-        // Root PV is at pv_table[0..pv_length[0]]
+        let mut pv = Vec::with_capacity(self.pv_length[0]);
         for i in 0..self.pv_length[0] {
             if let Some(m) = self.pv_table[i] {
-                if !pv_str.is_empty() {
-                    pv_str.push(' ');
-                }
-                let promo = m.promotion.map_or("", |p| p.to_site_code());
-                pv_str.push_str(&format!(
-                    "{},{}->{},{}{}",
-                    m.from.x, m.from.y, m.to.x, m.to.y, promo
-                ));
+                pv.push(m);
             }
         }
-        pv_str
+        self.format_pv_line(&pv)
     }
 
     /// Print UCI-style info string with optional MultiPV index
@@ -1090,20 +1100,7 @@ impl Searcher {
             0
         };
         let tt_fill = GLOBAL_TT.get().map_or(0, |tt| tt.fill_permille());
-
-        // Proper mate score display
-        let score_str = if score > MATE_SCORE {
-            // Positive mate score = we are mating
-            let mate_in = (MATE_VALUE - score + 1) / 2;
-            format!("mate {}", mate_in)
-        } else if score < -MATE_SCORE {
-            // Negative mate score = we are getting mated
-            let mate_in = (MATE_VALUE + score + 1) / 2;
-            format!("mate -{}", mate_in)
-        } else {
-            format!("cp {}", score)
-        };
-
+        let score_str = self.format_score(score);
         let pv = self.format_pv();
 
         #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
@@ -1167,6 +1164,50 @@ impl Searcher {
                     tt_fill,
                     pv
                 );
+            }
+        }
+    }
+
+    /// Aggregate all PV lines for a depth and print them as a single grouped update
+    pub fn print_multi_pv_depth(&self, depth: usize, lines: &[PVLine]) {
+        if lines.is_empty() {
+            return;
+        }
+
+        let time_ms = self.hot.timer.elapsed_ms();
+        let nps = if time_ms > 0 {
+            (self.hot.nodes as u128 * 1000) / time_ms
+        } else {
+            0
+        };
+        let tt_fill = GLOBAL_TT.get().map_or(0, |tt| tt.fill_permille());
+
+        #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+        {
+            use crate::{group, groupEnd, log};
+            group(&format!(
+                "Depth {} (time {}ms, nodes {}, nps {}, hash {}‰)",
+                depth, time_ms, self.hot.nodes, nps, tt_fill
+            ));
+
+            for (idx, line) in lines.iter().enumerate() {
+                let score_str = self.format_score(line.score);
+                let pv_str = self.format_pv_line(&line.pv);
+                log(&format!("#{} {} pv {}", idx + 1, score_str, pv_str));
+            }
+            groupEnd();
+        }
+
+        #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+        {
+            eprintln!(
+                "Depth {} (time {}ms, nodes {}, nps {}, hash {}‰)",
+                depth, time_ms, self.hot.nodes, nps, tt_fill
+            );
+            for (idx, line) in lines.iter().enumerate() {
+                let score_str = self.format_score(line.score);
+                let pv_str = self.format_pv_line(&line.pv);
+                eprintln!("#{} {} pv {}", idx + 1, score_str, pv_str);
             }
         }
     }
@@ -1824,7 +1865,101 @@ pub fn get_best_moves_multipv(
     })
 }
 
-fn get_best_moves_multipv_impl(
+/// Selects a move from MultiPV results using Stockfish's strength-limiting logic.
+/// weakness = 120 - 2 * skill_level
+/// push = (weakness * (top_score - score) + delta * (rng % weakness)) / 128
+fn pick_best(result: &MultiPVResult, skill_level: u32) -> Option<(Move, i32)> {
+    if result.lines.is_empty() {
+        return None;
+    }
+    if result.lines.len() == 1 || skill_level >= 20 {
+        let best = &result.lines[0];
+        return Some((best.mv, best.score));
+    }
+
+    let top_score = result.lines[0].score;
+    let last_score = result.lines.last().unwrap().score;
+    let delta = (top_score - last_score).min(100); // 100 cp = PawnValue
+    let weakness = 120 - 2 * skill_level as i32;
+
+    let mut max_score = -INFINITY;
+    let mut chosen_idx = 0;
+
+    for (idx, line) in result.lines.iter().enumerate() {
+        let rng_val = (random() * (weakness as f64)) as i32;
+        let push = (weakness * (top_score - line.score) + delta * rng_val) / 128;
+
+        if line.score + push >= max_score {
+            max_score = line.score + push;
+            chosen_idx = idx;
+        }
+    }
+
+    let best = &result.lines[chosen_idx];
+    Some((best.mv, best.score))
+}
+
+/// Entry point for searches with strength limiting.
+/// Consolidated to use standard search path with root-level move selection.
+pub(crate) fn get_best_move_limited(
+    game: &mut GameState,
+    max_depth: usize,
+    opt_time_ms: u128,
+    max_time_ms: u128,
+    strength_level: Option<u32>,
+    silent: bool,
+    is_soft_limit: bool,
+) -> Option<(Move, i32, SearchStats)> {
+    game.recompute_piece_counts();
+    game.recompute_correction_hashes();
+
+    let strength = strength_level.unwrap_or(3).clamp(1, 3);
+    if strength >= 3 {
+        return get_best_move(game, max_depth, opt_time_ms, silent, is_soft_limit);
+    }
+
+    GLOBAL_SEARCHER.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        let searcher = opt.get_or_insert_with(|| Searcher::new(max_time_ms));
+
+        searcher.new_search();
+        searcher
+            .hot
+            .set_time_limits(opt_time_ms, max_time_ms, is_soft_limit);
+        searcher.silent = silent;
+        searcher.hot.timer.reset();
+
+        searcher.set_corrhist_mode(game);
+        searcher.move_rule_limit = game
+            .game_rules
+            .move_rule_limit
+            .map_or(i32::MAX, |v| v as i32);
+
+        // Ensure TT is initialized
+        GLOBAL_TT.get_or_init(|| TranspositionTable::new(16));
+
+        // Smart Strength Limiting:
+        // Use MultiPV at the root and pick_best selection logic.
+        // multi_pv count and skill_level derived from strength_level.
+        let (multi_pv, skill_level) = match strength {
+            1 => (4, 4),  // Easy
+            2 => (3, 10), // Medium
+            _ => (1, 20),
+        };
+
+        if multi_pv > 1 {
+            let result = get_best_moves_multipv_impl(searcher, game, max_depth, multi_pv, silent);
+            let stats = result.stats.clone();
+            pick_best(&result, skill_level).map(|(m, eval)| (m, eval, stats))
+        } else {
+            let res = search_with_searcher(searcher, game, max_depth);
+            let stats = build_search_stats(searcher);
+            res.map(|(m, eval)| (m, eval, stats))
+        }
+    })
+}
+
+pub(crate) fn get_best_moves_multipv_impl(
     searcher: &mut Searcher,
     game: &mut GameState,
     max_depth: usize,
@@ -1841,10 +1976,33 @@ fn get_best_moves_multipv_impl(
         };
     }
 
-    // If only one move, return it immediately
-    if moves.len() == 1 {
-        let single = moves[0];
-        let score = crate::evaluation::evaluate(game);
+    // Find legal moves only (filter pseudo-legal)
+    let mut legal_root_moves: MoveList = MoveList::new();
+    let mut fallback_move: Option<Move> = None;
+    for m in moves {
+        let undo = game.make_move(&m);
+        let legal = !game.is_move_illegal();
+        game.undo_move(&m, undo);
+        if legal {
+            if fallback_move.is_none() {
+                fallback_move = Some(m);
+            }
+            legal_root_moves.push(m);
+        }
+    }
+
+    if legal_root_moves.is_empty() {
+        let stats = build_search_stats(searcher);
+        return MultiPVResult {
+            lines: Vec::new(),
+            stats,
+        };
+    }
+
+    // If only one move, return immediately with a simple static eval as score.
+    if legal_root_moves.len() == 1 {
+        let single = legal_root_moves[0];
+        let score = evaluate(game);
         let stats = build_search_stats(searcher);
         return MultiPVResult {
             lines: vec![PVLine {
@@ -1857,25 +2015,6 @@ fn get_best_moves_multipv_impl(
         };
     }
 
-    // Find legal moves only (filter pseudo-legal)
-    let mut legal_root_moves: MoveList = MoveList::new();
-    for m in &moves {
-        let undo = game.make_move(m);
-        let legal = !game.is_move_illegal();
-        game.undo_move(m, undo);
-        if legal {
-            legal_root_moves.push(*m);
-        }
-    }
-
-    if legal_root_moves.is_empty() {
-        let stats = build_search_stats(searcher);
-        return MultiPVResult {
-            lines: Vec::new(),
-            stats,
-        };
-    }
-
     // Cap multi_pv at number of legal moves
     let multi_pv = multi_pv.min(legal_root_moves.len());
 
@@ -1883,16 +2022,44 @@ fn get_best_moves_multipv_impl(
     let mut root_scores: Vec<(Move, i32, Vec<Move>)> = Vec::with_capacity(legal_root_moves.len());
     let mut best_lines: Vec<PVLine> = Vec::with_capacity(multi_pv);
 
+    // Lazy SMP: Helper threads start at different depths to create search diversity.
+    let start_depth = if searcher.thread_id > 0 && searcher.thread_id % 2 == 1 {
+        2.min(max_depth)
+    } else {
+        1
+    };
+
     // Iterative deepening
-    for depth in 1..=max_depth {
+    for base_depth in start_depth..=max_depth {
+        let depth = if searcher.thread_id > 0 && searcher.thread_id % 2 == 1 {
+            (base_depth + 1).min(max_depth)
+        } else {
+            base_depth
+        };
+
         searcher.reset_for_iteration();
+        searcher.hot.iter_start_ms = searcher.hot.timer.elapsed_ms() as f64;
+        searcher.hot.tot_best_move_changes /= 2.0;
 
         // Time check at start of each iteration - but always complete depth 1
-        if searcher.hot.min_depth_required == 0
-            && searcher.hot.timer.elapsed_ms() >= searcher.hot.time_limit_ms
-        {
-            searcher.hot.stopped = true;
-            break;
+        if searcher.hot.min_depth_required == 0 && searcher.hot.time_limit_ms != u128::MAX {
+            let elapsed = searcher.hot.timer.elapsed_ms() as f64;
+
+            if elapsed >= searcher.hot.maximum_time_ms as f64 {
+                searcher.hot.stopped = true;
+                break;
+            }
+
+            let proactive_threshold = if searcher.hot.is_soft_limit {
+                0.90
+            } else {
+                0.50
+            };
+            if searcher.hot.total_time_ms > 0.0
+                && elapsed > searcher.hot.total_time_ms * proactive_threshold
+            {
+                break;
+            }
         }
 
         root_scores.clear();
@@ -1909,6 +2076,7 @@ fn get_best_moves_multipv_impl(
             let undo = game.make_move(m);
 
             // Set up prev move info for child search
+            let prev_entry_backup = searcher.prev_move_stack[0];
             let prev_from_hash = hash_move_from(m);
             let prev_to_hash = hash_move_dest(m);
             searcher.prev_move_stack[0] = (prev_from_hash, prev_to_hash);
@@ -1956,6 +2124,7 @@ fn get_best_moves_multipv_impl(
                 s
             };
 
+            searcher.prev_move_stack[0] = prev_entry_backup;
             game.undo_move(m, undo);
 
             if !searcher.hot.stopped {
@@ -1995,90 +2164,26 @@ fn get_best_moves_multipv_impl(
 
         // Update best_lines with results from this depth
         best_lines.clear();
-        for (idx, (mv, score, pv)) in root_scores.iter().take(multi_pv).enumerate() {
+        for (_, (mv, score, pv)) in root_scores.iter().take(multi_pv).enumerate() {
             best_lines.push(PVLine {
                 mv: *mv,
                 score: *score,
-                depth,
+                depth: depth.min(searcher.hot.seldepth.max(1)),
                 pv: pv.clone(),
             });
-
-            // Print info for each PV line
-            if !silent && !searcher.hot.stopped {
-                // Format PV string
-                let pv_str: String = pv
-                    .iter()
-                    .map(|m| {
-                        format!(
-                            "{},{}->{},{}{}",
-                            m.from.x,
-                            m.from.y,
-                            m.to.x,
-                            m.to.y,
-                            m.promotion.map_or("", |p| p.to_site_code())
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                let time_ms = searcher.hot.timer.elapsed_ms();
-                let nps = if time_ms > 0 {
-                    (searcher.hot.nodes as u128 * 1000) / time_ms
-                } else {
-                    0
-                };
-
-                let score_str = if *score > MATE_SCORE {
-                    let mate_in = (MATE_VALUE - score + 1) / 2;
-                    format!("mate {}", mate_in)
-                } else if *score < -MATE_SCORE {
-                    let mate_in = (MATE_VALUE + score + 1) / 2;
-                    format!("mate -{}", mate_in)
-                } else {
-                    format!("cp {}", score)
-                };
-
-                #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
-                {
-                    use crate::log;
-                    log(&format!(
-                        "info depth {} seldepth {} multipv {} score {} nodes {} nps {} time {} pv {}",
-                        depth,
-                        searcher.hot.seldepth,
-                        idx + 1,
-                        score_str,
-                        searcher.hot.nodes,
-                        nps,
-                        time_ms,
-                        pv_str
-                    ));
-                }
-                #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
-                {
-                    eprintln!(
-                        "info depth {} seldepth {} multipv {} score {} nodes {} nps {} time {} pv {}",
-                        depth,
-                        searcher.hot.seldepth,
-                        idx + 1,
-                        score_str,
-                        searcher.hot.nodes,
-                        nps,
-                        time_ms,
-                        pv_str
-                    );
-                }
-            }
         }
 
-        // After depth 1 completes, allow time stops for subsequent depths
-        if depth == 1 {
-            searcher.hot.min_depth_required = 0;
+        if !silent {
+            searcher.print_multi_pv_depth(depth, &best_lines);
         }
 
-        // Check for mate or time up
-        if searcher.hot.stopped {
-            break;
-        }
+        searcher.prev_score = if !root_scores.is_empty() {
+            root_scores[0].1
+        } else {
+            -INFINITY
+        };
+        searcher.hot.min_depth_required = 0;
+
         if !best_lines.is_empty() && best_lines[0].score.abs() > MATE_SCORE {
             break;
         }

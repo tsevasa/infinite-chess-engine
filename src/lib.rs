@@ -146,6 +146,10 @@ extern "C" {
     fn alert(s: &str);
     #[wasm_bindgen(js_namespace = console)]
     pub fn log(s: &str);
+    #[wasm_bindgen(js_namespace = console)]
+    pub fn group(s: &str);
+    #[wasm_bindgen(js_namespace = console)]
+    pub fn groupEnd();
 }
 
 // Lazy SMP via wasm-bindgen-rayon
@@ -570,7 +574,7 @@ impl Engine {
         }
 
         game.en_passant = parsed_en_passant;
-        
+
         if js_game.move_history.is_empty() {
             game.turn = js_turn;
         } else {
@@ -790,7 +794,6 @@ impl Engine {
         time_limit_ms: u32,
         silent: Option<bool>,
         max_depth: Option<usize>,
-        noise_amp: Option<i32>,
     ) -> JsValue {
         // let legal_moves = self.game.get_legal_moves();
         // web_sys::console::log_1(&format!("Legal moves: {:?}", legal_moves).into());
@@ -803,20 +806,7 @@ impl Engine {
         };
         let silent = silent.unwrap_or(false);
         let depth = max_depth.unwrap_or(50).clamp(1, 50);
-        let strength = self.strength_level.unwrap_or(3).clamp(1, 3);
-
-        // Determine effective noise amplitude:
-        // 1. If explicit noise_amp is provided, use it
-        // 2. Otherwise, derive from strength level
-        let effective_noise: i32 = if let Some(amp) = noise_amp {
-            amp.max(0)
-        } else {
-            match strength {
-                1 => 800,
-                2 => 400,
-                _ => 0, // strength 3 = no noise
-            }
-        };
+        let strength = self.strength_level;
 
         #[allow(unused_variables)]
         let pre_stats = crate::search::get_current_tt_stats();
@@ -863,15 +853,15 @@ impl Engine {
             }
         }
 
-        // Choose search path based on effective noise.
-        let (best_move, eval) = if effective_noise > 0 {
-            // Use noisy search
-            if let Some((bm, ev, _stats)) = search::get_best_move_with_noise(
+        // Choose search path based on strength level.
+        let (best_move, eval) = if strength.is_some_and(|s| s < 3) {
+            // Use strength limited search
+            if let Some((bm, ev, _stats)) = search::get_best_move_limited(
                 &mut self.game,
                 depth,
                 opt_time,
                 max_time,
-                effective_noise,
+                strength,
                 silent,
                 is_soft_limit,
             ) {
