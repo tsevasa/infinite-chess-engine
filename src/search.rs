@@ -1186,7 +1186,7 @@ impl Searcher {
         {
             use crate::{group, groupEnd, log};
             group(&format!(
-                "Depth {} (time {}ms, nodes {}, nps {}, hash {}‰)",
+                "Depth {} (time {}ms, nodes {}, nps {}, hashfull {}‰)",
                 depth, time_ms, self.hot.nodes, nps, tt_fill
             ));
 
@@ -1201,7 +1201,7 @@ impl Searcher {
         #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
         {
             eprintln!(
-                "Depth {} (time {}ms, nodes {}, nps {}, hash {}‰)",
+                "Depth {} (time {}ms, nodes {}, nps {}, hashfull {}‰)",
                 depth, time_ms, self.hot.nodes, nps, tt_fill
             );
             for (idx, line) in lines.iter().enumerate() {

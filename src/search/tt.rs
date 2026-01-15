@@ -201,7 +201,7 @@ impl TTEntry {
 /// This improves collision handling - when storing, we pick the least valuable
 /// entry in the bucket to replace.
 #[derive(Clone, Copy)]
-#[repr(C)]
+#[repr(C, align(64))]
 pub struct TTBucket {
     entries: [TTEntry; ENTRIES_PER_BUCKET],
 }
@@ -222,7 +222,7 @@ impl TTBucket {
 /// Transposition Table with bucket-based collision handling.
 ///
 /// Key optimizations:
-/// - Bucket system: 3 entries per index reduces effective collision rate
+/// - Bucket system: 4 entries per bucket reduces effective collision rate
 /// - Align entries to cache lines (64 bytes)
 /// - Store FULL 64-bit hash key to prevent collisions
 /// - Power-of-two sizing for fast index calculation
