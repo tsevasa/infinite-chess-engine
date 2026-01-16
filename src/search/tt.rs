@@ -60,7 +60,7 @@ impl TTEntry {
     /// Check if entry is empty
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.from_x == NO_MOVE_SENTINEL && self.key32 == 0
+        self.move_info == 0 && self.key32 == 0
     }
 
     /// Extract the bound type from gen_bound
@@ -90,7 +90,7 @@ impl TTEntry {
     /// Get the best move as Option<Move>
     #[inline]
     pub fn best_move(&self) -> Option<Move> {
-        if self.from_x == NO_MOVE_SENTINEL {
+        if self.move_info == 0 {
             return None;
         }
 
@@ -320,55 +320,56 @@ impl LocalTranspositionTable {
         let mut replace_idx = 0;
         let mut worst_score = i32::MAX;
 
+        // Pack move info if within bounds
+        let mut new_move_info = 0;
+        let mut new_from_x = 0;
+        let mut new_from_y = 0;
+        let mut new_to_x = 0;
+        let mut new_to_y = 0;
+
+        if let Some(m) = &params.best_move {
+            if m.from.x >= i32::MIN as i64
+                && m.from.x <= i32::MAX as i64
+                && m.from.y >= i32::MIN as i64
+                && m.from.y <= i32::MAX as i64
+                && m.to.x >= i32::MIN as i64
+                && m.to.x <= i32::MAX as i64
+                && m.to.y >= i32::MIN as i64
+                && m.to.y <= i32::MAX as i64
+            {
+                let pt = m.piece.piece_type() as u16;
+                let cl = m.piece.color() as u16;
+                let pr = m.promotion.map_or(0, |p| p as u16);
+                new_move_info = (pt & 0x1F) | ((cl & 0x03) << 5) | ((pr & 0x1F) << 7);
+                new_from_x = m.from.x as i32;
+                new_from_y = m.from.y as i32;
+                new_to_x = m.to.x as i32;
+                new_to_y = m.to.y as i32;
+            }
+        }
+
         for (i, entry) in bucket.entries.iter_mut().enumerate() {
             if entry.key32 == signature && !entry.is_empty() {
-                let move_info = if let Some(m) = &params.best_move {
-                    if m.from.x >= i32::MIN as i64
-                        && m.from.x <= i32::MAX as i64
-                        && m.from.y >= i32::MIN as i64
-                        && m.from.y <= i32::MAX as i64
-                        && m.to.x >= i32::MIN as i64
-                        && m.to.x <= i32::MAX as i64
-                        && m.to.y >= i32::MIN as i64
-                        && m.to.y <= i32::MAX as i64
-                    {
-                        let pt = m.piece.piece_type() as u16;
-                        let cl = m.piece.color() as u16;
-                        let pr = m.promotion.map_or(0, |p| p as u16);
-                        (pt & 0x1F) | ((cl & 0x03) << 5) | ((pr & 0x1F) << 7)
+                // Determine what to store for move and evaluation
+                let (store_move_info, store_from_x, store_from_y, store_to_x, store_to_y) =
+                    if new_move_info != 0 {
+                        (new_move_info, new_from_x, new_from_y, new_to_x, new_to_y)
                     } else {
-                        entry.move_info
-                    }
-                } else {
-                    entry.move_info
-                };
-
-                let from_x = if params.best_move.is_some() {
-                    params.best_move.as_ref().unwrap().from.x as i32
-                } else {
-                    entry.from_x
-                };
-                let from_y = if params.best_move.is_some() {
-                    params.best_move.as_ref().unwrap().from.y as i32
-                } else {
-                    entry.from_y
-                };
-                let to_x = if params.best_move.is_some() {
-                    params.best_move.as_ref().unwrap().to.x as i32
-                } else {
-                    entry.to_x
-                };
-                let to_y = if params.best_move.is_some() {
-                    params.best_move.as_ref().unwrap().to.y as i32
-                } else {
-                    entry.to_y
-                };
+                        (
+                            entry.move_info,
+                            entry.from_x,
+                            entry.from_y,
+                            entry.to_x,
+                            entry.to_y,
+                        )
+                    };
 
                 let eval_to_store = if params.static_eval != INFINITY + 1 {
                     params.static_eval
                 } else {
                     entry.eval
                 };
+
                 let pv_bonus = if params.flag == TTFlag::Exact || params.is_pv {
                     2
                 } else {
@@ -384,14 +385,14 @@ impl LocalTranspositionTable {
                     *entry = TTEntry {
                         score: adjusted_score,
                         eval: eval_to_store,
-                        from_x,
-                        from_y,
-                        to_x,
-                        to_y,
+                        from_x: store_from_x,
+                        from_y: store_from_y,
+                        to_x: store_to_x,
+                        to_y: store_to_y,
                         key32: signature,
                         depth: params.depth as u8,
                         gen_bound: TTEntry::pack_gen_bound(generation, params.is_pv, params.flag),
-                        move_info,
+                        move_info: store_move_info,
                     };
                 } else if entry.depth >= 5 && entry.flag() != TTFlag::Exact {
                     entry.depth = entry.depth.saturating_sub(1);
@@ -406,44 +407,17 @@ impl LocalTranspositionTable {
             }
         }
 
-        let mut move_info = 0;
-        let mut from_x = NO_MOVE_SENTINEL;
-        let mut from_y = 0;
-        let mut to_x = 0;
-        let mut to_y = 0;
-
-        if let Some(m) = &params.best_move {
-            if m.from.x >= i32::MIN as i64
-                && m.from.x <= i32::MAX as i64
-                && m.from.y >= i32::MIN as i64
-                && m.from.y <= i32::MAX as i64
-                && m.to.x >= i32::MIN as i64
-                && m.to.x <= i32::MAX as i64
-                && m.to.y >= i32::MIN as i64
-                && m.to.y <= i32::MAX as i64
-            {
-                let pt = m.piece.piece_type() as u16;
-                let cl = m.piece.color() as u16;
-                let pr = m.promotion.map_or(0, |p| p as u16);
-                move_info = (pt & 0x1F) | ((cl & 0x03) << 5) | ((pr & 0x1F) << 7);
-                from_x = m.from.x as i32;
-                from_y = m.from.y as i32;
-                to_x = m.to.x as i32;
-                to_y = m.to.y as i32;
-            }
-        }
-
         let new_entry = TTEntry {
             score: adjusted_score,
             eval: params.static_eval,
-            from_x,
-            from_y,
-            to_x,
-            to_y,
+            from_x: new_from_x,
+            from_y: new_from_y,
+            to_x: new_to_x,
+            to_y: new_to_y,
             key32: signature,
             depth: params.depth as u8,
             gen_bound: TTEntry::pack_gen_bound(generation, params.is_pv, params.flag),
-            move_info,
+            move_info: new_move_info,
         };
 
         if Self::calculate_replacement_score(&new_entry, generation) >= worst_score {
@@ -537,11 +511,63 @@ mod tests {
             (pt as u16 & 0x1F) | ((cl as u16 & 0x03) << 5) | ((pr.unwrap() as u16 & 0x1F) << 7);
         let mut entry = TTEntry::empty();
         entry.move_info = info;
-        entry.from_x = 0; // Not empty
+        entry.from_x = 0;
 
         let m = entry.best_move().unwrap();
         assert_eq!(m.piece.piece_type(), PieceType::Knight);
         assert_eq!(m.piece.color(), PlayerColor::Black);
         assert_eq!(m.promotion, Some(PieceType::Queen));
+    }
+
+    #[test]
+    fn test_tt_i32_sentinel_edge_case() {
+        // Test that from_x = i32::MIN is NOT treated as empty if move_info is set
+        let mut entry = TTEntry::empty();
+        entry.from_x = i32::MIN;
+        entry.move_info = 1; // Valid move info
+        assert!(!entry.is_empty());
+        assert!(entry.best_move().is_some());
+    }
+
+    #[test]
+    fn test_tt_out_of_range_coords() {
+        let tt = LocalTranspositionTable::new(1);
+        let hash = 0x1122334455667788u64;
+
+        // Move with out-of-range coords
+        let m = Move {
+            from: Coordinate::new(i32::MAX as i64 + 1, 0),
+            to: Coordinate::new(0, 0),
+            piece: Piece::new(PieceType::Pawn, PlayerColor::White),
+            promotion: None,
+            rook_coord: None,
+        };
+
+        tt.store(&TTStoreParams {
+            hash,
+            depth: 5,
+            flag: TTFlag::Exact,
+            score: 100,
+            static_eval: 90,
+            is_pv: false,
+            best_move: Some(m),
+            ply: 0,
+        });
+
+        let res = tt.probe(&TTProbeParams {
+            hash,
+            alpha: -1000,
+            beta: 1000,
+            depth: 5,
+            ply: 0,
+            rule50_count: 0,
+            rule_limit: 100,
+        });
+
+        assert!(res.is_some());
+        let (s, e, mv, _) = res.unwrap();
+        assert_eq!(s, 100);
+        assert_eq!(e, 90);
+        assert!(mv.is_none(), "Out of range move should not be stored");
     }
 }
