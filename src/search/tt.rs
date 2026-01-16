@@ -7,6 +7,12 @@ use super::{INFINITY, MATE_SCORE};
 const ENTRIES_PER_BUCKET: usize = 4;
 const NO_MOVE_SENTINEL: i32 = i32::MIN;
 
+const GENERATION_BITS: u8 = 3;
+const GENERATION_DELTA: u8 = 1 << GENERATION_BITS;
+#[allow(clippy::identity_op)]
+const GENERATION_MASK: u8 = (0xFF << GENERATION_BITS) & 0xFF;
+const GENERATION_CYCLE: u16 = 255 + GENERATION_DELTA as u16;
+
 // ============================================================================
 // TT Entry (32 bytes)
 // ============================================================================
@@ -75,16 +81,17 @@ impl TTEntry {
         (self.gen_bound & 0x04) != 0
     }
 
-    /// Extract the generation from gen_bound
-    #[inline]
-    pub fn generation(&self) -> u8 {
-        self.gen_bound >> 3
-    }
-
     /// Create packed gen_bound from generation, is_pv and flag
     #[inline]
     fn pack_gen_bound(generation: u8, is_pv: bool, flag: TTFlag) -> u8 {
-        ((generation & 0x1F) << 3) | (if is_pv { 0x04 } else { 0 }) | (flag as u8 & 0x03)
+        (generation & GENERATION_MASK) | (if is_pv { 0x04 } else { 0 }) | (flag as u8 & 0x03)
+    }
+
+    /// Calculate relative age of entry compared to current generation
+    #[inline]
+    pub fn relative_age(&self, current_gen: u8) -> u8 {
+        ((GENERATION_CYCLE + current_gen as u16 - (self.gen_bound as u16))
+            & (GENERATION_MASK as u16)) as u8
     }
 
     /// Get the best move as Option<Move>
@@ -327,25 +334,24 @@ impl LocalTranspositionTable {
         let mut new_to_x = 0;
         let mut new_to_y = 0;
 
-        if let Some(m) = &params.best_move {
-            if m.from.x >= i32::MIN as i64
-                && m.from.x <= i32::MAX as i64
-                && m.from.y >= i32::MIN as i64
-                && m.from.y <= i32::MAX as i64
-                && m.to.x >= i32::MIN as i64
-                && m.to.x <= i32::MAX as i64
-                && m.to.y >= i32::MIN as i64
-                && m.to.y <= i32::MAX as i64
-            {
-                let pt = m.piece.piece_type() as u16;
-                let cl = m.piece.color() as u16;
-                let pr = m.promotion.map_or(0, |p| p as u16);
-                new_move_info = (pt & 0x1F) | ((cl & 0x03) << 5) | ((pr & 0x1F) << 7);
-                new_from_x = m.from.x as i32;
-                new_from_y = m.from.y as i32;
-                new_to_x = m.to.x as i32;
-                new_to_y = m.to.y as i32;
-            }
+        if let Some(m) = &params.best_move
+            && m.from.x >= i32::MIN as i64
+            && m.from.x <= i32::MAX as i64
+            && m.from.y >= i32::MIN as i64
+            && m.from.y <= i32::MAX as i64
+            && m.to.x >= i32::MIN as i64
+            && m.to.x <= i32::MAX as i64
+            && m.to.y >= i32::MIN as i64
+            && m.to.y <= i32::MAX as i64
+        {
+            let pt = m.piece.piece_type() as u16;
+            let cl = m.piece.color() as u16;
+            let pr = m.promotion.map_or(0, |p| p as u16);
+            new_move_info = (pt & 0x1F) | ((cl & 0x03) << 5) | ((pr & 0x1F) << 7);
+            new_from_x = m.from.x as i32;
+            new_from_y = m.from.y as i32;
+            new_to_x = m.to.x as i32;
+            new_to_y = m.to.y as i32;
         }
 
         for (i, entry) in bucket.entries.iter_mut().enumerate() {
@@ -375,11 +381,11 @@ impl LocalTranspositionTable {
                 } else {
                     0
                 };
-                let age_diff = (generation.wrapping_sub(entry.generation())) & 0x1F;
+                let rel_age = entry.relative_age(generation);
 
                 if params.flag == TTFlag::Exact
                     || (params.depth as i32 + pv_bonus) > (entry.depth as i32 - 4)
-                    || age_diff != 0
+                    || rel_age != 0
                     || params.depth == 0
                 {
                     *entry = TTEntry {
@@ -400,7 +406,7 @@ impl LocalTranspositionTable {
                 return;
             }
 
-            let entry_priority = Self::calculate_replacement_score(entry, generation);
+            let entry_priority = (entry.depth as i32) - (entry.relative_age(generation) as i32);
             if entry_priority < worst_score {
                 worst_score = entry_priority;
                 replace_idx = i;
@@ -420,31 +426,16 @@ impl LocalTranspositionTable {
             move_info: new_move_info,
         };
 
-        if Self::calculate_replacement_score(&new_entry, generation) >= worst_score {
-            if bucket.entries[replace_idx].is_empty() {
-                unsafe { *used_ptr += 1 };
-            }
-            bucket.entries[replace_idx] = new_entry;
+        if bucket.entries[replace_idx].is_empty() {
+            unsafe { *used_ptr += 1 };
         }
-    }
-
-    #[inline]
-    fn calculate_replacement_score(entry: &TTEntry, current_gen: u8) -> i32 {
-        if entry.is_empty() {
-            return i32::MIN;
-        }
-        let mut score = entry.depth as i32;
-        score -= ((current_gen.wrapping_sub(entry.generation())) & 0x1F) as i32 * 2;
-        if entry.flag() == TTFlag::Exact || entry.is_pv() {
-            score += 2;
-        }
-        score
+        bucket.entries[replace_idx] = new_entry;
     }
 
     pub fn increment_age(&self) {
+        let gen_ptr = self.generation.get();
         unsafe {
-            let next_gen = (*self.generation.get() + 1) & 0x1F;
-            *self.generation.get() = if next_gen == 0 { 1 } else { next_gen };
+            *gen_ptr = (*gen_ptr).wrapping_add(GENERATION_DELTA);
         }
     }
 
@@ -504,11 +495,10 @@ mod tests {
         // Test a Knight (16) with Black color (2) and Queen promotion (8)
         let pt = PieceType::Knight;
         let cl = PlayerColor::Black;
-        let pr = Some(PieceType::Queen);
+        let pr = PieceType::Queen;
 
         // Pack
-        let info =
-            (pt as u16 & 0x1F) | ((cl as u16 & 0x03) << 5) | ((pr.unwrap() as u16 & 0x1F) << 7);
+        let info = (pt as u16 & 0x1F) | ((cl as u16 & 0x03) << 5) | ((pr as u16 & 0x1F) << 7);
         let mut entry = TTEntry::empty();
         entry.move_info = info;
         entry.from_x = 0;
@@ -569,5 +559,100 @@ mod tests {
         assert_eq!(s, 100);
         assert_eq!(e, 90);
         assert!(mv.is_none(), "Out of range move should not be stored");
+    }
+
+    #[test]
+    fn test_tt_replacement() {
+        // 1MB TT -> 8192 buckets. Mask 8191.
+        let tt = LocalTranspositionTable::new(1);
+        let bucket_count = 8192;
+
+        // Fill one bucket with 4 entries
+        // We use hashes that collide on index 0 (hash & 8191 == 0)
+        // but have different signatures (hash >> 13)
+        #[allow(clippy::identity_op, clippy::erasing_op)]
+        let entries = vec![
+            (10, 0 * bucket_count), // Depth 10, Hash 0
+            (20, 1 * bucket_count), // Depth 20, Hash 8192
+            (30, 2 * bucket_count), // Depth 30, Hash 16384
+            (40, 3 * bucket_count), // Depth 40, Hash 24576
+        ];
+
+        for (depth, hash) in &entries {
+            tt.store(&TTStoreParams {
+                hash: *hash as u64,
+                depth: *depth,
+                flag: TTFlag::Exact,
+                score: 100,
+                static_eval: 0,
+                is_pv: false,
+                best_move: None,
+                ply: 0,
+            });
+        }
+
+        // Increment age twice (total 16 generation delta)
+        // Old entries relative age will be 16.
+        tt.increment_age();
+        tt.increment_age();
+
+        // Scores:
+        // E1: 10 - 16 = -6 (Best candidate for eviction)
+        // E2: 20 - 16 = 4
+        // E3: 30 - 16 = 14
+        // E4: 40 - 16 = 24
+
+        // Store new entry (Depth 5) -> relative age 0 -> Score 5
+        // It should replace E1 (-6 < 5)
+        let new_hash = 4 * bucket_count; // Hash 32768
+        tt.store(&TTStoreParams {
+            hash: new_hash as u64,
+            depth: 5,
+            flag: TTFlag::Exact,
+            score: 200, // Distinct score
+            static_eval: 0,
+            is_pv: false,
+            best_move: None,
+            ply: 0,
+        });
+
+        // Verify E1 (hash 0) is gone
+        let res = tt.probe(&TTProbeParams {
+            hash: 0,
+            alpha: -1000,
+            beta: 1000,
+            depth: 0,
+            ply: 0,
+            rule50_count: 0,
+            rule_limit: 100,
+        });
+        assert!(res.is_none(), "Oldest/Weakest entry should be replaced");
+
+        // Verify other entries are still there
+        for i in 1..4 {
+            let res = tt.probe(&TTProbeParams {
+                hash: entries[i].1 as u64,
+                alpha: -1000,
+                beta: 1000,
+                depth: 0,
+                ply: 0,
+                rule50_count: 0,
+                rule_limit: 100,
+            });
+            assert!(res.is_some(), "Stronger entries should be preserved");
+        }
+
+        // Verify new entry is present
+        let res = tt.probe(&TTProbeParams {
+            hash: new_hash as u64,
+            alpha: -1000,
+            beta: 1000,
+            depth: 0,
+            ply: 0,
+            rule50_count: 0,
+            rule_limit: 100,
+        });
+        assert!(res.is_some(), "New entry should be stored");
+        assert_eq!(res.unwrap().0, 200, "New entry score mismatch");
     }
 }

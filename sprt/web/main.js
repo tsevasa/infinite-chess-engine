@@ -827,12 +827,26 @@ async function detectMaxConcurrency(maxCap = 64) {
 async function runSprt() {
     if (!wasmReady || sprtRunning) return;
 
+    // Immediate UI Reset
+    sprtWinsEl.textContent = '0';
+    sprtLossesEl.textContent = '0';
+    sprtDrawsEl.textContent = '0';
+    sprtEloEl.textContent = '-';
+    // Reset last stats snapshot
+    lastWins = 0;
+    lastLosses = 0;
+    lastDraws = 0;
+    lastElo = 0;
+    lastEloError = 0;
+    lastLLR = 0;
+    lastBounds = null;
+
     sprtRunning = true;
     stopRequested = false;
     runSprtBtn.disabled = true;
     stopSprtBtn.disabled = false;
 
-    // Read configuration from UI
+    // Read configuration from UI into global CONFIG first (to persist defaults)
     CONFIG.boundsPreset = sprtBoundsPreset.value || 'all';
     CONFIG.boundsMode = sprtBoundsMode.value || 'gainer';
     CONFIG.alpha = parseFloat(sprtAlphaEl.value) || 0.05;
@@ -865,16 +879,42 @@ async function runSprt() {
     if (CONFIG.minGames % 2 !== 0) CONFIG.minGames++;
     if (CONFIG.maxGames % 2 !== 0) CONFIG.maxGames++;
 
-    applyBoundsPreset();
+    applyBoundsPreset(); // This updates CONFIG.elo0/elo1 based on preset
+
+    // --- SNAPSHOT CONFIGURATION ---
+    // Create a local runConfig to isolate this run from future UI/global changes
+    const runConfig = { ...CONFIG };
+
+    // Calculate bounds based on the SNAPSHOTTED config
+    const bounds = calculateBounds(runConfig.alpha, runConfig.beta);
+    // Update global lastBounds so stopSprt can display them correctly if aborted
+    lastBounds = bounds;
+
+    // --- SNAPSHOT VARIANTS ---
+    // Create a local variant queue sequence to isolate from UI changes.
+    // If variants were just selected, variantQueue is up-to-date.
+    // We make a copy to lock it in.
+    let runVariantQueue = [...variantQueue];
+    if (runVariantQueue.length === 0) {
+        runVariantQueue.push({ variant: 'Classical', newPlaysWhite: true });
+    }
+    let nextVariantIndex = 0;
+
+    function getNextVariantForRun() {
+        const result = runVariantQueue[nextVariantIndex];
+        nextVariantIndex = (nextVariantIndex + 1) % runVariantQueue.length;
+        return result;
+    }
+
     // Validate for Standard mode only, or basic check.
     // If smart_mix, we ignore inputs essentially.
-    let displayTcString = CONFIG.timeControl;
+    let displayTcString = runConfig.timeControl;
     let displayPerMoveMs = 0;
 
-    if (CONFIG.tcMode === 'standard') {
-        const tc = parseTimeControl(CONFIG.timeControl);
+    if (runConfig.tcMode === 'standard') {
+        const tc = parseTimeControl(runConfig.timeControl);
         if (!tc) {
-            log('Invalid time control: ' + CONFIG.timeControl + ' (expected base+inc in seconds)', 'error');
+            log('Invalid time control: ' + runConfig.timeControl + ' (expected base+inc in seconds)', 'error');
             sprtRunning = false;
             runSprtBtn.disabled = false;
             stopSprtBtn.disabled = true;
@@ -882,28 +922,19 @@ async function runSprt() {
         }
         displayTcString = tc.tcString;
         displayPerMoveMs = Math.max(10, Math.round(((tc.baseSec / 20) + (tc.incSec / 2)) * 1000));
-    } else if (CONFIG.tcMode === 'smart_mix') {
+    } else if (runConfig.tcMode === 'smart_mix') {
         displayTcString = 'Smart Mix';
         displayPerMoveMs = 'Var';
     } else {
         // fixed time/depth
-        const p = getTcParams(CONFIG.tcMode, CONFIG.timeControl, 0);
+        const p = getTcParams(runConfig.tcMode, runConfig.timeControl, 0);
         displayTcString = p.tcString;
         displayPerMoveMs = p.timePerMove || 0;
     }
     const timePerMove = displayPerMoveMs; // For info log only
-    const bounds = calculateBounds(CONFIG.alpha, CONFIG.beta);
-    // reset last stats snapshot for this run
-    lastBounds = bounds;
-    lastWins = 0;
-    lastLosses = 0;
-    lastDraws = 0;
-    lastElo = 0;
-    lastEloError = 0;
-    lastLLR = 0;
 
-    const maxGames = CONFIG.maxGames;
-    const maxMovesPerGame = CONFIG.maxMoves;
+    const maxGames = runConfig.maxGames;
+    const maxMovesPerGame = runConfig.maxMoves;
 
     let wins = 0;
     let losses = 0;
@@ -920,10 +951,10 @@ async function runSprt() {
     clearLog();
     sprtStatusEl.textContent = 'Status: running...';
     sprtStatusEl.className = 'sprt-status';
-    log('Starting SPRT: ' + maxGames + ' games (' + (maxGames / 2) + ' pairs), Mode=' + CONFIG.tcMode + ', TC=' + displayTcString, 'info');
+    log('Starting SPRT: ' + maxGames + ' games (' + (maxGames / 2) + ' pairs), Mode=' + runConfig.tcMode + ', TC=' + displayTcString, 'info');
     sprtLog('SPRT Test Started (noisy opening moves for first 4 ply, paired games)');
 
-    const maxConcurrent = Math.max(1, CONFIG.concurrency | 0);
+    const maxConcurrent = Math.max(1, runConfig.concurrency | 0);
     const workers = [];
     let activeWorkers = 0;
     let nextGameIndex = 0;
@@ -933,13 +964,14 @@ async function runSprt() {
         if (gameIndex >= maxGames) return false;
         activeWorkers++;
 
-        // Get next variant from the cycling queue
-        const { variant: variantName, newPlaysWhite } = getNextVariant();
+        // Get next variant from the LOCAL SNAPSHOT queue
+        const { variant: variantName, newPlaysWhite } = getNextVariantForRun();
 
         // Games run in pairs: each variant appears twice (both colors)
         const pairIndex = Math.floor(gameIndex / 2);
 
-        const tcParams = getTcParams(CONFIG.tcMode, CONFIG.timeControl, pairIndex);
+        // Use runConfig for TC params
+        const tcParams = getTcParams(runConfig.tcMode, runConfig.timeControl, pairIndex);
 
         worker.postMessage({
             type: 'runGame',
@@ -947,8 +979,8 @@ async function runSprt() {
             timePerMove: tcParams.timePerMove,
             maxMoves: maxMovesPerGame,
             newPlaysWhite,
-            materialThreshold: CONFIG.materialThreshold,
-            searchNoise: CONFIG.searchNoise,
+            materialThreshold: runConfig.materialThreshold,
+            searchNoise: runConfig.searchNoise,
             baseTimeMs: tcParams.baseTimeMs,
             incrementMs: tcParams.incrementMs,
             maxDepth: tcParams.maxDepth,
@@ -1008,7 +1040,8 @@ async function runSprt() {
                         else perVariantStats[vName].draws++;
 
                         const total = wins + losses + draws;
-                        llr = calculateLLR(wins, losses, draws, CONFIG.elo0, CONFIG.elo1);
+                        // Use runConfig for ELO
+                        llr = calculateLLR(wins, losses, draws, runConfig.elo0, runConfig.elo1);
                         const { elo, error } = estimateElo(wins, losses, draws);
 
                         // update last stats snapshot so Stop can show partial results
@@ -1041,8 +1074,8 @@ async function runSprt() {
                         // Only check SPRT termination after even number of games (completed pairs)
                         const canTerminate = (total % 2 === 0);
                         const reachedBounds = canTerminate &&
-                            total >= CONFIG.minGames && (llr >= bounds.upper || llr <= bounds.lower);
-                        const reachedMax = canTerminate && total >= CONFIG.maxGames;
+                            total >= runConfig.minGames && (llr >= bounds.upper || llr <= bounds.lower);
+                        const reachedMax = canTerminate && total >= runConfig.maxGames;
 
                         activeWorkers--;
 
@@ -1087,7 +1120,7 @@ async function runSprt() {
                             errStr.includes('Cannot allocate Wasm memory');
                         if (oomLike) {
                             const stored = loadStoredMaxConcurrency();
-                            const current = CONFIG.concurrency | 0;
+                            const current = runConfig.concurrency | 0;
                             const proposed = Math.max(1, Math.min(current - 1, stored || current));
                             if (proposed < (stored || Infinity)) {
                                 saveStoredMaxConcurrency(proposed);

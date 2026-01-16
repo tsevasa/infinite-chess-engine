@@ -525,16 +525,15 @@ impl GameState {
                 if coord.y != wk_pos.y || coord.x == wk_pos.x {
                     continue;
                 }
-                if let Some(piece) = self.board.get_piece(coord.x, coord.y) {
-                    if piece.color() == PlayerColor::White
-                        && piece.piece_type() != PieceType::Pawn
-                        && !piece.piece_type().is_royal()
-                    {
-                        if coord.x > wk_pos.x {
-                            self.castling_partner_counts[0] += 1;
-                        } else {
-                            self.castling_partner_counts[1] += 1;
-                        }
+                if let Some(piece) = self.board.get_piece(coord.x, coord.y)
+                    && piece.color() == PlayerColor::White
+                    && piece.piece_type() != PieceType::Pawn
+                    && !piece.piece_type().is_royal()
+                {
+                    if coord.x > wk_pos.x {
+                        self.castling_partner_counts[0] += 1;
+                    } else {
+                        self.castling_partner_counts[1] += 1;
                     }
                 }
             }
@@ -555,16 +554,15 @@ impl GameState {
                 if coord.y != bk_pos.y || coord.x == bk_pos.x {
                     continue;
                 }
-                if let Some(piece) = self.board.get_piece(coord.x, coord.y) {
-                    if piece.color() == PlayerColor::Black
-                        && piece.piece_type() != PieceType::Pawn
-                        && !piece.piece_type().is_royal()
-                    {
-                        if coord.x > bk_pos.x {
-                            self.castling_partner_counts[2] += 1;
-                        } else {
-                            self.castling_partner_counts[3] += 1;
-                        }
+                if let Some(piece) = self.board.get_piece(coord.x, coord.y)
+                    && piece.color() == PlayerColor::Black
+                    && piece.piece_type() != PieceType::Pawn
+                    && !piece.piece_type().is_royal()
+                {
+                    if coord.x > bk_pos.x {
+                        self.castling_partner_counts[2] += 1;
+                    } else {
+                        self.castling_partner_counts[3] += 1;
                     }
                 }
             }
@@ -631,10 +629,11 @@ impl GameState {
             for (dx, dy) in KNIGHT_OFFSETS {
                 let tx = wk.x + dx;
                 let ty = wk.y + dy;
-                if let Some(p) = self.board.get_piece(tx, ty) {
-                    if p.color() == PlayerColor::Black && p.piece_type() == PieceType::Knight {
-                        self.checkers_count_white += 1;
-                    }
+                if let Some(p) = self.board.get_piece(tx, ty)
+                    && p.color() == PlayerColor::Black
+                    && p.piece_type() == PieceType::Knight
+                {
+                    self.checkers_count_white += 1;
                 }
                 self.check_squares_white
                     .insert((tx, ty, PieceType::Knight as u8));
@@ -643,10 +642,11 @@ impl GameState {
             for dx in [-1, 1] {
                 let tx = wk.x + dx;
                 let ty = wk.y + 1;
-                if let Some(p) = self.board.get_piece(tx, ty) {
-                    if p.color() == PlayerColor::Black && p.piece_type() == PieceType::Pawn {
-                        self.checkers_count_white += 1;
-                    }
+                if let Some(p) = self.board.get_piece(tx, ty)
+                    && p.color() == PlayerColor::Black
+                    && p.piece_type() == PieceType::Pawn
+                {
+                    self.checkers_count_white += 1;
                 }
                 self.check_squares_white
                     .insert((tx, ty, PieceType::Pawn as u8));
@@ -668,30 +668,28 @@ impl GameState {
                         }
 
                         // Potential Discovered check for Black (if bx,by moves)
-                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy) {
-                            if let Some(p2) = self.board.get_piece(bx2, by2) {
-                                if p2.color() == PlayerColor::Black {
-                                    let pt2 = p2.piece_type();
-                                    if (is_ortho && is_ortho_slider(pt2))
-                                        || (!is_ortho && is_diag_slider(pt2))
-                                    {
-                                        self.discovered_check_squares_black.insert((bx, by));
-                                    }
-                                }
+                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy)
+                            && let Some(p2) = self.board.get_piece(bx2, by2)
+                            && p2.color() == PlayerColor::Black
+                        {
+                            let pt2 = p2.piece_type();
+                            if (is_ortho && is_ortho_slider(pt2))
+                                || (!is_ortho && is_diag_slider(pt2))
+                            {
+                                self.discovered_check_squares_black.insert((bx, by));
                             }
                         }
                     } else {
                         // Friendly piece - could be pinned?
-                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy) {
-                            if let Some(p2) = self.board.get_piece(bx2, by2) {
-                                if p2.color() == PlayerColor::Black {
-                                    let pt2 = p2.piece_type();
-                                    if (is_ortho && is_ortho_slider(pt2))
-                                        || (!is_ortho && is_diag_slider(pt2))
-                                    {
-                                        self.pinned_white.insert((bx, by), (*dx, *dy));
-                                    }
-                                }
+                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy)
+                            && let Some(p2) = self.board.get_piece(bx2, by2)
+                            && p2.color() == PlayerColor::Black
+                        {
+                            let pt2 = p2.piece_type();
+                            if (is_ortho && is_ortho_slider(pt2))
+                                || (!is_ortho && is_diag_slider(pt2))
+                            {
+                                self.pinned_white.insert((bx, by), (*dx, *dy));
                             }
                         }
                     }
@@ -705,10 +703,11 @@ impl GameState {
             for (dx, dy) in KNIGHT_OFFSETS {
                 let tx = bk.x + dx;
                 let ty = bk.y + dy;
-                if let Some(p) = self.board.get_piece(tx, ty) {
-                    if p.color() == PlayerColor::White && p.piece_type() == PieceType::Knight {
-                        self.checkers_count_black += 1;
-                    }
+                if let Some(p) = self.board.get_piece(tx, ty)
+                    && p.color() == PlayerColor::White
+                    && p.piece_type() == PieceType::Knight
+                {
+                    self.checkers_count_black += 1;
                 }
                 self.check_squares_black
                     .insert((tx, ty, PieceType::Knight as u8));
@@ -717,10 +716,11 @@ impl GameState {
             for dx in [-1, 1] {
                 let tx = bk.x + dx;
                 let ty = bk.y - 1;
-                if let Some(p) = self.board.get_piece(tx, ty) {
-                    if p.color() == PlayerColor::White && p.piece_type() == PieceType::Pawn {
-                        self.checkers_count_black += 1;
-                    }
+                if let Some(p) = self.board.get_piece(tx, ty)
+                    && p.color() == PlayerColor::White
+                    && p.piece_type() == PieceType::Pawn
+                {
+                    self.checkers_count_black += 1;
                 }
                 self.check_squares_black
                     .insert((tx, ty, PieceType::Pawn as u8));
@@ -742,30 +742,28 @@ impl GameState {
                         }
 
                         // Potential Discovered check for White (if bx,by moves)
-                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy) {
-                            if let Some(p2) = self.board.get_piece(bx2, by2) {
-                                if p2.color() == PlayerColor::White {
-                                    let pt2 = p2.piece_type();
-                                    if (is_ortho && is_ortho_slider(pt2))
-                                        || (!is_ortho && is_diag_slider(pt2))
-                                    {
-                                        self.discovered_check_squares_white.insert((bx, by));
-                                    }
-                                }
+                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy)
+                            && let Some(p2) = self.board.get_piece(bx2, by2)
+                            && p2.color() == PlayerColor::White
+                        {
+                            let pt2 = p2.piece_type();
+                            if (is_ortho && is_ortho_slider(pt2))
+                                || (!is_ortho && is_diag_slider(pt2))
+                            {
+                                self.discovered_check_squares_white.insert((bx, by));
                             }
                         }
                     } else {
                         // Friendly piece - could be pinned?
-                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy) {
-                            if let Some(p2) = self.board.get_piece(bx2, by2) {
-                                if p2.color() == PlayerColor::White {
-                                    let pt2 = p2.piece_type();
-                                    if (is_ortho && is_ortho_slider(pt2))
-                                        || (!is_ortho && is_diag_slider(pt2))
-                                    {
-                                        self.pinned_black.insert((bx, by), (*dx, *dy));
-                                    }
-                                }
+                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy)
+                            && let Some(p2) = self.board.get_piece(bx2, by2)
+                            && p2.color() == PlayerColor::White
+                        {
+                            let pt2 = p2.piece_type();
+                            if (is_ortho && is_ortho_slider(pt2))
+                                || (!is_ortho && is_diag_slider(pt2))
+                            {
+                                self.pinned_black.insert((bx, by), (*dx, *dy));
                             }
                         }
                     }
@@ -792,11 +790,10 @@ impl GameState {
 
         if dx == 0 {
             // Vertical ray (N or S) - use cols[start_x] to get all y coords
-            if let Some(col_vec) = self.spatial_indices.cols.get(&start_x) {
-                if let Some((found_y, _packed)) = SpatialIndices::find_nearest(col_vec, start_y, dy)
-                {
-                    return Some((start_x, found_y));
-                }
+            if let Some(col_vec) = self.spatial_indices.cols.get(&start_x)
+                && let Some((found_y, _packed)) = SpatialIndices::find_nearest(col_vec, start_y, dy)
+            {
+                return Some((start_x, found_y));
             }
         } else if dy == 0 {
             // Horizontal ray (E or W) - use rows[start_y] to get all x coords
@@ -1363,10 +1360,10 @@ impl GameState {
 
         // Hash individual PAWN special rights (double-push rights)
         for coord in &self.special_rights {
-            if let Some(piece) = self.board.get_piece(coord.x, coord.y) {
-                if piece.piece_type() == PieceType::Pawn {
-                    h ^= pawn_special_right_key(coord.x, coord.y);
-                }
+            if let Some(piece) = self.board.get_piece(coord.x, coord.y)
+                && piece.piece_type() == PieceType::Pawn
+            {
+                h ^= pawn_special_right_key(coord.x, coord.y);
             }
         }
 
@@ -1701,10 +1698,10 @@ impl GameState {
                         } else {
                             block_coord
                         };
-                        if let Some(p) = self.board.get_piece(bx, by) {
-                            if p.color() == our_color {
-                                continue;
-                            }
+                        if let Some(p) = self.board.get_piece(bx, by)
+                            && p.color() == our_color
+                        {
+                            continue;
                         }
 
                         let dist_from_huygen = (block_coord - our_huygen_coord).abs();
@@ -1852,10 +1849,10 @@ impl GameState {
 
                         if between {
                             let dist_from_checker = (checker_sq.y - ty).abs();
-                            if is_prime_fast(dist_from_checker) {
-                                if s.is_path_clear_for_rook(&from, &Coordinate::new(tx, ty)) {
-                                    out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
-                                }
+                            if is_prime_fast(dist_from_checker)
+                                && s.is_path_clear_for_rook(&from, &Coordinate::new(tx, ty))
+                            {
+                                out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
                             }
                         }
                     }
@@ -1888,10 +1885,11 @@ impl GameState {
                         // Check same diagonal
                         let dx = block_sq.x - from.x;
                         let dy = block_sq.y - from.y;
-                        if dx != 0 && dx.abs() == dy.abs() {
-                            if s.is_path_clear_for_bishop(&from, block_sq) {
-                                out.push(Move::new(from, *block_sq, *piece));
-                            }
+                        if dx != 0
+                            && dx.abs() == dy.abs()
+                            && s.is_path_clear_for_bishop(&from, block_sq)
+                        {
+                            out.push(Move::new(from, *block_sq, *piece));
                         }
                     }
                 }
@@ -2323,16 +2321,15 @@ impl GameState {
                 }
                 // Special case: en passant capture removes piece at ep.pawn_square, not m.to
                 // If the checker is at ep.pawn_square, the EP move captures it and escapes check
-                if m.piece.piece_type() == PieceType::Pawn {
-                    if let Some(ep) = &s.en_passant {
-                        if m.to.x == ep.square.x && m.to.y == ep.square.y {
-                            // This is an EP capture - check if it captures the checker
-                            if ep.pawn_square.x == checker_sq.x && ep.pawn_square.y == checker_sq.y
-                            {
-                                out.push(m);
-                                continue;
-                            }
-                        }
+                if m.piece.piece_type() == PieceType::Pawn
+                    && let Some(ep) = &s.en_passant
+                    && m.to.x == ep.square.x
+                    && m.to.y == ep.square.y
+                {
+                    // This is an EP capture - check if it captures the checker
+                    if ep.pawn_square.x == checker_sq.x && ep.pawn_square.y == checker_sq.y {
+                        out.push(m);
+                        continue;
                     }
                 }
                 // Blocking moves for sliders (straight line check rays) and knightrider checkers
@@ -2847,18 +2844,19 @@ impl GameState {
                     self.white_king_pos
                 } else {
                     self.black_king_pos
-                } {
-                    if m.from.y == k_pos.y {
-                        let idx = if piece.color() == PlayerColor::White {
-                            if m.from.x > k_pos.x { 0 } else { 1 }
-                        } else {
-                            if m.from.x > k_pos.x { 2 } else { 3 }
-                        };
-                        self.castling_partner_counts[idx] =
-                            self.castling_partner_counts[idx].saturating_sub(1);
-                        if self.castling_partner_counts[idx] == 0 {
-                            self.effective_castling_rights &= !(1 << idx);
-                        }
+                } && m.from.y == k_pos.y
+                {
+                    let idx = if piece.color() == PlayerColor::White {
+                        if m.from.x > k_pos.x { 0 } else { 1 }
+                    } else if m.from.x > k_pos.x {
+                        2
+                    } else {
+                        3
+                    };
+                    self.castling_partner_counts[idx] =
+                        self.castling_partner_counts[idx].saturating_sub(1);
+                    if self.castling_partner_counts[idx] == 0 {
+                        self.effective_castling_rights &= !(1 << idx);
                     }
                 }
             }
@@ -2884,18 +2882,19 @@ impl GameState {
                     self.white_king_pos
                 } else {
                     self.black_king_pos
-                } {
-                    if m.to.y == k_pos.y {
-                        let idx = if captured.color() == PlayerColor::White {
-                            if m.to.x > k_pos.x { 0 } else { 1 }
-                        } else {
-                            if m.to.x > k_pos.x { 2 } else { 3 }
-                        };
-                        self.castling_partner_counts[idx] =
-                            self.castling_partner_counts[idx].saturating_sub(1);
-                        if self.castling_partner_counts[idx] == 0 {
-                            self.effective_castling_rights &= !(1 << idx);
-                        }
+                } && m.to.y == k_pos.y
+                {
+                    let idx = if captured.color() == PlayerColor::White {
+                        if m.to.x > k_pos.x { 0 } else { 1 }
+                    } else if m.to.x > k_pos.x {
+                        2
+                    } else {
+                        3
+                    };
+                    self.castling_partner_counts[idx] =
+                        self.castling_partner_counts[idx].saturating_sub(1);
+                    if self.castling_partner_counts[idx] == 0 {
+                        self.effective_castling_rights &= !(1 << idx);
                     }
                 }
             }
@@ -2925,18 +2924,19 @@ impl GameState {
                     self.white_king_pos
                 } else {
                     self.black_king_pos
-                } {
-                    if rook_coord.y == k_pos.y {
-                        let idx = if rook.color() == PlayerColor::White {
-                            if rook_coord.x > k_pos.x { 0 } else { 1 }
-                        } else {
-                            if rook_coord.x > k_pos.x { 2 } else { 3 }
-                        };
-                        self.castling_partner_counts[idx] =
-                            self.castling_partner_counts[idx].saturating_sub(1);
-                        if self.castling_partner_counts[idx] == 0 {
-                            self.effective_castling_rights &= !(1 << idx);
-                        }
+                } && rook_coord.y == k_pos.y
+                {
+                    let idx = if rook.color() == PlayerColor::White {
+                        if rook_coord.x > k_pos.x { 0 } else { 1 }
+                    } else if rook_coord.x > k_pos.x {
+                        2
+                    } else {
+                        3
+                    };
+                    self.castling_partner_counts[idx] =
+                        self.castling_partner_counts[idx].saturating_sub(1);
+                    if self.castling_partner_counts[idx] == 0 {
+                        self.effective_castling_rights &= !(1 << idx);
                     }
                 }
             }
@@ -3114,34 +3114,31 @@ impl GameState {
         }
 
         // Handle En Passant capture undo - use the stored captured piece
-        if let Some(captured_pawn) = undo.ep_captured_piece {
-            if let Some(ep) = &undo.old_en_passant {
-                // Restore the captured piece (could be a pawn or promoted piece)
-                self.board
-                    .set_piece(ep.pawn_square.x, ep.pawn_square.y, captured_pawn);
-                self.spatial_indices.add(
-                    ep.pawn_square.x,
-                    ep.pawn_square.y,
-                    captured_pawn.packed(),
-                );
+        if let Some(captured_pawn) = undo.ep_captured_piece
+            && let Some(ep) = &undo.old_en_passant
+        {
+            // Restore the captured piece (could be a pawn or promoted piece)
+            self.board
+                .set_piece(ep.pawn_square.x, ep.pawn_square.y, captured_pawn);
+            self.spatial_indices
+                .add(ep.pawn_square.x, ep.pawn_square.y, captured_pawn.packed());
 
-                // Restore material hash
-                self.material_hash = self.material_hash.wrapping_add(material_key(
-                    captured_pawn.piece_type(),
-                    captured_pawn.color(),
-                ));
+            // Restore material hash
+            self.material_hash = self.material_hash.wrapping_add(material_key(
+                captured_pawn.piece_type(),
+                captured_pawn.color(),
+            ));
 
-                // Restore material value and piece counts
-                let value = get_piece_value(captured_pawn.piece_type());
-                if captured_pawn.color() == PlayerColor::White {
-                    self.material_score += value;
-                    self.white_piece_count = self.white_piece_count.saturating_add(1);
-                    self.white_pawn_count = self.white_pawn_count.saturating_add(1);
-                } else {
-                    self.material_score -= value;
-                    self.black_piece_count = self.black_piece_count.saturating_add(1);
-                    self.black_pawn_count = self.black_pawn_count.saturating_add(1);
-                }
+            // Restore material value and piece counts
+            let value = get_piece_value(captured_pawn.piece_type());
+            if captured_pawn.color() == PlayerColor::White {
+                self.material_score += value;
+                self.white_piece_count = self.white_piece_count.saturating_add(1);
+                self.white_pawn_count = self.white_pawn_count.saturating_add(1);
+            } else {
+                self.material_score -= value;
+                self.black_piece_count = self.black_piece_count.saturating_add(1);
+                self.black_pawn_count = self.black_pawn_count.saturating_add(1);
             }
         }
 

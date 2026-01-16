@@ -101,3 +101,15 @@ pub struct TTStoreParams {
     pub best_move: Option<Move>,
     pub ply: usize,
 }
+
+/// Result from a TT probe
+#[derive(Debug, Clone, Copy)]
+pub struct TTProbeResult {
+    pub cutoff_score: i32, // Result of old probe(): includes depth check, bounds, and 50-move rule
+    pub tt_score: i32, // Result of old probe_for_singular(): only hash check, simplified mate logic
+    pub eval: i32,
+    pub depth: u8,
+    pub flag: TTFlag,
+    pub is_pv: bool,
+    pub best_move: Option<Move>,
+}
