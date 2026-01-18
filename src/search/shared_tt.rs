@@ -445,6 +445,19 @@ impl SharedTranspositionTable {
         None
     }
 
+    /// Probe only for the best move (used for PV extraction)
+    pub fn probe_move(&self, hash: u64) -> Option<Move> {
+        let idx = self.bucket_index(hash);
+        let bucket = &self.buckets[idx];
+
+        for entry in &bucket.entries {
+            if let Some((_, _, _, _, best_move)) = entry.read(hash) {
+                return best_move;
+            }
+        }
+        None
+    }
+
     pub fn store(&self, params: &TTStoreParams) {
         let hash = params.hash;
         let adjusted_score = value_to_tt(params.score, params.ply);

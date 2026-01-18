@@ -239,6 +239,20 @@ impl LocalTranspositionTable {
     #[cfg(not(all(target_arch = "x86_64", not(target_arch = "wasm32"))))]
     pub fn prefetch_entry(&self, _hash: u64) {}
 
+    pub fn probe_move(&self, hash: u64) -> Option<Move> {
+        let signature = self.hash_signature(hash);
+        let idx = self.bucket_index(hash);
+        let buckets = unsafe { &*self.buckets.get() };
+        let bucket = &buckets[idx];
+
+        for entry in &bucket.entries {
+            if entry.key32 == signature && !entry.is_empty() {
+                return entry.best_move();
+            }
+        }
+        None
+    }
+
     pub fn probe(&self, params: &TTProbeParams) -> Option<(i32, i32, Option<Move>, bool)> {
         let signature = self.hash_signature(params.hash);
         let idx = self.bucket_index(params.hash);

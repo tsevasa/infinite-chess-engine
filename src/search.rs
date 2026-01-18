@@ -260,6 +260,15 @@ impl<'a> TranspositionTableRef<'a> {
     }
 
     #[inline]
+    pub fn probe_move(&self, hash: u64) -> Option<Move> {
+        match self {
+            Self::Local(tt) => tt.probe_move(hash),
+            #[cfg(feature = "multithreading")]
+            Self::Shared(tt) => tt.probe_move(hash),
+        }
+    }
+
+    #[inline]
     pub fn store(&self, params: &TTStoreParams) {
         match self {
             Self::Local(tt) => tt.store(params),
@@ -1120,24 +1129,113 @@ impl Searcher {
             .join(" ")
     }
 
-    /// Format current searcher's PV as string
-    pub fn format_pv(&self) -> String {
+    /// Extract PV by following TT moves (for display only)
+    pub fn extract_pv_from_tt(&self, game: &mut GameState, max_len: usize) -> Vec<Move> {
+        let mut pv = Vec::with_capacity(max_len);
+        let mut seen_hashes = Vec::with_capacity(max_len);
+        let mut undos = Vec::with_capacity(max_len);
+
+        for _ in 0..max_len {
+            let hash = game.hash;
+            if seen_hashes.contains(&hash) {
+                break;
+            }
+            seen_hashes.push(hash);
+
+            let tt_move = if let Some(tt) = GLOBAL_TT.get() {
+                tt.probe_move(hash)
+            } else {
+                break;
+            };
+
+            if let Some(m) = tt_move {
+                let undo = game.make_move(&m);
+                if game.is_move_illegal() {
+                    game.undo_move(&m, undo);
+                    break;
+                }
+                pv.push(m);
+                undos.push(undo);
+            } else {
+                break;
+            }
+        }
+
+        // Undo all moves in reverse
+        for (m, undo) in pv.iter().zip(undos.into_iter()).rev() {
+            game.undo_move(m, undo);
+        }
+        pv
+    }
+
+    /// Extract the PV line (for internal use by MultiPV single-line path)
+    pub fn extract_pv_only(&self, game: &mut GameState, depth: usize) -> Vec<Move> {
         let mut pv = Vec::with_capacity(self.pv_length[0]);
         for i in 0..self.pv_length[0] {
             if let Some(m) = self.pv_table[i] {
                 pv.push(m);
             }
         }
+
+        if pv.len() < depth {
+            let mut undos = Vec::with_capacity(depth);
+            for m in &pv {
+                undos.push(game.make_move(m));
+            }
+
+            let mut seen_hashes = Vec::with_capacity(depth);
+            for _ in pv.len()..depth {
+                let hash = game.hash;
+                if seen_hashes.contains(&hash) {
+                    break;
+                }
+                seen_hashes.push(hash);
+
+                let tt_move = if let Some(tt) = GLOBAL_TT.get() {
+                    tt.probe_move(hash)
+                } else {
+                    break;
+                };
+
+                if let Some(m) = tt_move {
+                    let undo = game.make_move(&m);
+                    if game.is_move_illegal() {
+                        game.undo_move(&m, undo);
+                        break;
+                    }
+                    pv.push(m);
+                    undos.push(undo);
+                } else {
+                    break;
+                }
+            }
+
+            for (m, undo) in pv.iter().zip(undos.into_iter()).rev() {
+                game.undo_move(m, undo);
+            }
+        }
+        pv
+    }
+
+    /// Format current searcher's PV as string
+    pub fn format_pv(&self, game: &mut GameState, depth: usize) -> String {
+        let pv = self.extract_pv_only(game, depth);
         self.format_pv_line(&pv)
     }
 
     /// Print UCI-style info string with optional MultiPV index
-    pub fn print_info(&self, depth: usize, score: i32) {
-        self.print_info_multipv(depth, score, 1);
+    pub fn print_info(&self, game: &mut GameState, depth: usize, score: i32) {
+        self.print_info_multipv(game, depth, score, 1);
     }
 
     /// Print UCI-style info string with MultiPV index
-    pub fn print_info_multipv(&self, depth: usize, score: i32, multipv: usize) {
+    pub fn print_info_multipv(
+        &self,
+        game: &mut GameState,
+        depth: usize,
+        score: i32,
+        multipv: usize,
+    ) {
         let time_ms = self.hot.timer.elapsed_ms();
         let nps = if time_ms > 0 {
             (self.hot.nodes as u128 * 1000) / time_ms
@@ -1146,7 +1244,7 @@ impl Searcher {
         };
         let tt_fill = GLOBAL_TT.get().map_or(0, |tt| tt.fill_permille());
         let score_str = self.format_score(score);
-        let pv = self.format_pv();
+        let pv = self.format_pv(game, depth);
 
         #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
         {
@@ -1439,7 +1537,7 @@ fn search_with_searcher(
         }
 
         if !searcher.hot.stopped && !searcher.silent {
-            searcher.print_info(depth, score);
+            searcher.print_info(game, depth, score);
         }
 
         // Check global stop flag (for helper threads)
@@ -1900,7 +1998,7 @@ pub fn get_best_moves_multipv(
         if multi_pv == 1 {
             let mut lines: Vec<PVLine> = Vec::with_capacity(1);
             if let Some((best_move, score)) = search_with_searcher(searcher, game, max_depth) {
-                let pv = extract_pv(searcher);
+                let pv = searcher.extract_pv_only(game, max_depth);
                 let depth = max_depth.min(searcher.hot.seldepth.max(1));
                 lines.push(PVLine {
                     mv: best_move,
@@ -2283,18 +2381,6 @@ pub(crate) fn get_best_moves_multipv_impl(
         lines: best_lines,
         stats,
     }
-}
-
-/// Extract the PV line from the searcher's PV table as a Vec<Move>.
-fn extract_pv(searcher: &Searcher) -> Vec<Move> {
-    // Root PV is at pv_table[0..pv_length[0]]
-    let mut pv = Vec::with_capacity(searcher.pv_length[0]);
-    for i in 0..searcher.pv_length[0] {
-        if let Some(m) = searcher.pv_table[i] {
-            pv.push(m);
-        }
-    }
-    pv
 }
 
 pub fn negamax_node_count_for_depth(game: &mut GameState, depth: usize) -> u64 {
@@ -4329,7 +4415,8 @@ mod tests {
     #[test]
     fn test_format_pv_empty() {
         let searcher = Searcher::new(1000);
-        let pv = searcher.format_pv();
+        let mut game = GameState::new();
+        let pv = searcher.format_pv(&mut game, 0);
         // PV should be a string (possibly empty)
         assert!(pv.is_empty() || !pv.is_empty());
     }
@@ -4367,7 +4454,8 @@ mod tests {
     #[test]
     fn test_extract_pv() {
         let searcher = Searcher::new(1000);
-        let pv = extract_pv(&searcher);
+        let mut game = GameState::new();
+        let pv = searcher.extract_pv_only(&mut game, 1);
         // PV should be empty for a fresh searcher
         assert!(pv.is_empty());
     }
