@@ -325,7 +325,7 @@ mod tests {
             .set_piece(1, 1, Piece::new(PieceType::Pawn, PlayerColor::White));
         game.board.rebuild_tiles();
 
-        let mut moves = vec![
+        let mut moves: MoveList = vec![
             Move::new(
                 Coordinate::new(1, 1),
                 Coordinate::new(5, 5),
@@ -336,7 +336,9 @@ mod tests {
                 Coordinate::new(4, 4),
                 Piece::new(PieceType::Knight, PlayerColor::White),
             ),
-        ];
+        ]
+        .into_iter()
+        .collect();
 
         sort_captures(&game, &mut moves);
 

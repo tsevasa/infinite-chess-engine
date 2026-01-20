@@ -17,6 +17,7 @@ use crate::board::{PieceType, PlayerColor};
 use crate::evaluation::get_piece_value;
 use crate::game::GameState;
 use crate::moves::{Move, MoveGenContext, MoveList, get_quiescence_captures, get_quiet_moves_into};
+use smallvec::SmallVec;
 
 /// Good quiet threshold (Stockfish: goodQuietThreshold = -14000)
 const GOOD_QUIET_THRESHOLD: i32 = -14000;
@@ -64,7 +65,7 @@ pub struct StagedMoveGen {
     tt_move: Option<Move>,
 
     // Move buffer
-    moves: Vec<ScoredMove>,
+    moves: SmallVec<[ScoredMove; 128]>,
     cur: usize,
     end_bad_captures: usize,
     end_captures: usize,
@@ -201,7 +202,7 @@ impl StagedMoveGen {
         Self {
             stage,
             tt_move,
-            moves: Vec::with_capacity(64),
+            moves: SmallVec::new(),
             cur: 0,
             end_bad_captures: 0,
             end_captures: 0,
@@ -277,9 +278,10 @@ impl StagedMoveGen {
 
             // Destination must not be friendly
             if let Some(target) = game.board.get_piece(m.to.x, m.to.y)
-                && target.color() == game.turn {
-                    return false;
-                }
+                && target.color() == game.turn
+            {
+                return false;
+            }
 
             // Castling validation
             if piece.piece_type() == PieceType::King && (m.to.x - m.from.x).abs() > 1 {
@@ -364,21 +366,22 @@ impl StagedMoveGen {
             if let Some(prev_move) = ply
                 .checked_sub(plies_ago + 1)
                 .and_then(|i| searcher.move_history.get(i).copied().flatten())
-                && let Some(&prev_piece) = searcher.moved_piece_history.get(ply - plies_ago - 1) {
-                    let prev_piece = prev_piece as usize;
-                    if prev_piece < 16 {
-                        let prev_to_h = hash_coord_32(prev_move.to.x, prev_move.to.y);
-                        if let Some(val) = searcher
-                            .cont_history
-                            .get(prev_piece)
-                            .and_then(|a| a.get(prev_to_h))
-                            .and_then(|b| b.get(cur_from_hash))
-                            .and_then(|c| c.get(cur_to_hash))
-                        {
-                            score += val;
-                        }
+                && let Some(&prev_piece) = searcher.moved_piece_history.get(ply - plies_ago - 1)
+            {
+                let prev_piece = prev_piece as usize;
+                if prev_piece < 16 {
+                    let prev_to_h = hash_coord_32(prev_move.to.x, prev_move.to.y);
+                    if let Some(val) = searcher
+                        .cont_history
+                        .get(prev_piece)
+                        .and_then(|a| a.get(prev_to_h))
+                        .and_then(|b| b.get(cur_from_hash))
+                        .and_then(|c| c.get(cur_to_hash))
+                    {
+                        score += val;
                     }
                 }
+            }
         }
 
         // Check bonus (if move gives check and SEE >= -75)
@@ -543,9 +546,10 @@ impl StagedMoveGen {
 
                     // Return TT move (already validated in constructor)
                     if let Some(tt_m) = self.tt_move
-                        && !self.is_excluded(&tt_m) {
-                            return Some(tt_m);
-                        }
+                        && !self.is_excluded(&tt_m)
+                    {
+                        return Some(tt_m);
+                    }
                 }
 
                 MoveStage::CaptureInit | MoveStage::QCaptureInit | MoveStage::ProbCutInit => {

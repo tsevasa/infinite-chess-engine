@@ -11,7 +11,7 @@ pub enum MoveGenType {
     Captures,
 }
 
-pub type MoveList = Vec<Move>;
+pub type MoveList = smallvec::SmallVec<[Move; 128]>;
 
 #[derive(Debug, Clone)]
 pub struct MoveGenContext<'a> {
