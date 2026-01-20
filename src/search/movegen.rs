@@ -17,7 +17,6 @@ use crate::board::{PieceType, PlayerColor};
 use crate::evaluation::get_piece_value;
 use crate::game::GameState;
 use crate::moves::{Move, MoveGenContext, MoveList, get_quiescence_captures, get_quiet_moves_into};
-use smallvec::SmallVec;
 
 /// Good quiet threshold (Stockfish: goodQuietThreshold = -14000)
 const GOOD_QUIET_THRESHOLD: i32 = -14000;
@@ -65,7 +64,7 @@ pub struct StagedMoveGen {
     tt_move: Option<Move>,
 
     // Move buffer
-    moves: SmallVec<[ScoredMove; 128]>,
+    moves: Vec<ScoredMove>,
     cur: usize,
     end_bad_captures: usize,
     end_captures: usize,
@@ -202,7 +201,7 @@ impl StagedMoveGen {
         Self {
             stage,
             tt_move,
-            moves: SmallVec::new(),
+            moves: Vec::new(),
             cur: 0,
             end_bad_captures: 0,
             end_captures: 0,

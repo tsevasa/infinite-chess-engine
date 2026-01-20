@@ -3486,6 +3486,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     searcher.prev_move_stack[ply] = prev_entry_backup;
                     searcher.move_history[ply] = move_history_backup;
                     searcher.moved_piece_history[ply] = piece_history_backup;
+
                     return 0;
                 }
 
@@ -3906,8 +3907,6 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         }
     }
 
-    // Staged gen doesn't use move_buffers, so no swap needed
-
     // Checkmate, stalemate, or loss by capture-based variants
     if legal_moves == 0 {
         // Determine if this is a loss:
@@ -4091,6 +4090,7 @@ fn quiescence(
     // Reuse per-ply move buffer to avoid Vec allocations inside quiescence.
     let mut tactical_moves: MoveList = MoveList::new();
     std::mem::swap(&mut tactical_moves, &mut searcher.move_buffers[ply]);
+    tactical_moves.clear();
 
     if must_escape {
         // In check and must escape - only generate evasion moves
@@ -4155,7 +4155,7 @@ fn quiescence(
 
         if searcher.hot.stopped {
             // Swap back move buffer before returning early
-            std::mem::swap(&mut searcher.move_buffers[ply], &mut tactical_moves);
+            std::mem::swap(&mut tactical_moves, &mut searcher.move_buffers[ply]);
             return best_score;
         }
 
@@ -4180,13 +4180,13 @@ fn quiescence(
         let no_pieces = !game.has_pieces(game.turn);
         if checkmate || no_pieces {
             // Swap back move buffer before returning mate score
-            std::mem::swap(&mut searcher.move_buffers[ply], &mut tactical_moves);
+            std::mem::swap(&mut tactical_moves, &mut searcher.move_buffers[ply]);
             return -MATE_VALUE + ply as i32;
         }
     }
 
     // Swap back move buffer for this ply before returning
-    std::mem::swap(&mut searcher.move_buffers[ply], &mut tactical_moves);
+    std::mem::swap(&mut tactical_moves, &mut searcher.move_buffers[ply]);
 
     // Adjust score for fail-high, but not for mate scores
     if !is_decisive(best_score) && best_score > beta {
