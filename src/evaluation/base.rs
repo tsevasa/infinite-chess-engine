@@ -285,7 +285,6 @@ const KING_DEFENDER_VALUE_THRESHOLD: i32 = 400; // Pieces below this value are d
 // Development thresholds - for attack scaling only
 const UNDEVELOPED_MINORS_THRESHOLD: i32 = 2;
 const DEVELOPMENT_PHASE_ATTACK_SCALE: i32 = 50;
-const DEVELOPED_PHASE_ATTACK_SCALE: i32 = 100;
 
 // ==================== Game Phase ====================
 
@@ -482,6 +481,150 @@ fn is_connected_pawn(game: &GameState, x: i64, y: i64, color: PlayerColor) -> bo
 }
 
 // Main Evaluation
+
+// ==================== Attack Readiness ====================
+
+/// Calculate attack readiness as a percentage (0-130) for the given attacker.
+/// Returns higher values when:
+/// 1. Enemy king has 3+ open rays (exposed)
+/// 2. Multiple sliders are within striking distance (coordinated attack)
+/// 3. At least one slider is on an open ray toward the enemy king
+///
+/// Returns lower values when:
+/// - Enemy king is well-shielded (few open rays)
+/// - Only a single attacker with no support (premature attack)
+fn calculate_attack_readiness(
+    game: &GameState,
+    attacker: PlayerColor,
+    enemy_king: &Option<Coordinate>,
+) -> i32 {
+    let Some(ek) = enemy_king else { return 50 }; // No enemy king = neutral
+
+    const ATTACK_ZONE_RADIUS: i64 = 10; // Pieces within this Chebyshev distance count
+
+    // 1. Count open rays on enemy king (diagonal + orthogonal)
+    let mut open_diag_rays = 0;
+    let mut open_ortho_rays = 0;
+
+    const DIAG_DIRS: [(i64, i64); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+    const ORTHO_DIRS: [(i64, i64); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
+    for &(dx, dy) in &DIAG_DIRS {
+        let mut is_open = true;
+        for step in 1..=6 {
+            if game
+                .board
+                .get_piece(ek.x + dx * step, ek.y + dy * step)
+                .is_some()
+            {
+                is_open = false;
+                break;
+            }
+        }
+        if is_open {
+            open_diag_rays += 1;
+        }
+    }
+
+    for &(dx, dy) in &ORTHO_DIRS {
+        let mut is_open = true;
+        for step in 1..=6 {
+            if game
+                .board
+                .get_piece(ek.x + dx * step, ek.y + dy * step)
+                .is_some()
+            {
+                is_open = false;
+                break;
+            }
+        }
+        if is_open {
+            open_ortho_rays += 1;
+        }
+    }
+
+    let total_open_rays = open_diag_rays + open_ortho_rays;
+
+    // If king is well-shielded (2 or fewer open rays), attacks are premature
+    if total_open_rays <= 2 {
+        return 40; // Heavy discount on attack bonuses
+    }
+
+    // 2. Count our sliders in attack zone + on open rays
+    let is_white_attacker = attacker == PlayerColor::White;
+    let mut sliders_in_zone: i32 = 0;
+    let mut sliders_on_open_ray: i32 = 0;
+
+    for (cx, cy, tile) in game.board.tiles.iter() {
+        let our_occ = if is_white_attacker {
+            tile.occ_white
+        } else {
+            tile.occ_black
+        };
+        if our_occ == 0 {
+            continue;
+        }
+
+        // Check sliders (diagonal and orthogonal)
+        let our_sliders = our_occ & (tile.occ_diag_sliders | tile.occ_ortho_sliders);
+        if our_sliders == 0 {
+            continue;
+        }
+
+        let mut bits = our_sliders;
+        while bits != 0 {
+            let idx = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+
+            let x = cx * 8 + (idx % 8) as i64;
+            let y = cy * 8 + (idx / 8) as i64;
+
+            // Check if in attack zone
+            let dx = (x - ek.x).abs();
+            let dy = (y - ek.y).abs();
+            let cheb = dx.max(dy);
+
+            if cheb <= ATTACK_ZONE_RADIUS {
+                sliders_in_zone += 1;
+
+                // Check if this slider is on an open ray toward the king
+                let is_diag = (our_occ & tile.occ_diag_sliders) & (1 << idx) != 0;
+                let is_ortho = (our_occ & tile.occ_ortho_sliders) & (1 << idx) != 0;
+
+                // On same file/rank/diagonal as king?
+                let on_file = x == ek.x;
+                let on_rank = y == ek.y;
+                let on_diag1 = (x - ek.x) == (y - ek.y);
+                let on_diag2 = (x - ek.x) == -(y - ek.y);
+
+                if (is_ortho && (on_file || on_rank)) || (is_diag && (on_diag1 || on_diag2)) {
+                    sliders_on_open_ray += 1;
+                }
+            }
+        }
+    }
+
+    // 3. Calculate readiness based on coordination
+    if sliders_in_zone >= 3 && sliders_on_open_ray >= 1 {
+        // Heavy attack with pieces on open rays
+        130
+    } else if sliders_in_zone >= 2 && sliders_on_open_ray >= 1 {
+        // Coordinated attack with at least one direct threat
+        115
+    } else if sliders_in_zone >= 2 {
+        // Coordinated attack but not yet on open rays
+        100
+    } else if sliders_in_zone == 1 && total_open_rays >= 5 {
+        // Single attacker but king is very exposed
+        85
+    } else if sliders_in_zone == 1 {
+        // Single attacker - premature
+        55
+    } else {
+        // No sliders in range
+        30
+    }
+}
 
 /// Lazy evaluation: Material + Simple Position (PST)
 /// Used for Null Move Pruning and other heuristics where speed is critical.
@@ -838,15 +981,21 @@ pub fn evaluate_pieces_traced<T: EvaluationTracer>(
     };
     */
 
+    // Calculate attack readiness based on coordination and enemy king exposure
+    // Considers: open rays on enemy king, sliders in attack zone, pieces on direct lines
+    let white_attack_scale = calculate_attack_readiness(game, PlayerColor::White, black_king);
+    let black_attack_scale = calculate_attack_readiness(game, PlayerColor::Black, white_king);
+
+    // Still factor in development - undeveloped minors cap max attack scale
     let white_attack_scale = if white_undeveloped >= UNDEVELOPED_MINORS_THRESHOLD {
-        DEVELOPMENT_PHASE_ATTACK_SCALE
+        white_attack_scale.min(DEVELOPMENT_PHASE_ATTACK_SCALE)
     } else {
-        DEVELOPED_PHASE_ATTACK_SCALE
+        white_attack_scale
     };
     let black_attack_scale = if black_undeveloped >= UNDEVELOPED_MINORS_THRESHOLD {
-        DEVELOPMENT_PHASE_ATTACK_SCALE
+        black_attack_scale.min(DEVELOPMENT_PHASE_ATTACK_SCALE)
     } else {
-        DEVELOPED_PHASE_ATTACK_SCALE
+        black_attack_scale
     };
 
     // BITBOARD: Pass 2 - Main evaluation
@@ -2458,50 +2607,52 @@ pub fn evaluate_threat_traced<T: EvaluationTracer>(game: &GameState, tracer: &mu
                     let dy = if color == PlayerColor::White { 1 } else { -1 };
                     for dx in [-1i64, 1] {
                         if let Some(target) = game.board.get_piece(x + dx, y + dy)
-                            && target.color() == enemy {
-                                let tv = get_piece_value(target.piece_type());
-                                if tv >= 600 {
-                                    if color == PlayerColor::White {
-                                        w_pawn_threats += PAWN_THREATENS_QUEEN;
-                                    } else {
-                                        b_pawn_threats += PAWN_THREATENS_QUEEN;
-                                    }
-                                } else if tv >= 400 {
-                                    if color == PlayerColor::White {
-                                        w_pawn_threats += PAWN_THREATENS_ROOK;
-                                    } else {
-                                        b_pawn_threats += PAWN_THREATENS_ROOK;
-                                    }
-                                } else if tv >= 200 {
-                                    if color == PlayerColor::White {
-                                        w_pawn_threats += PAWN_THREATENS_MINOR;
-                                    } else {
-                                        b_pawn_threats += PAWN_THREATENS_MINOR;
-                                    }
+                            && target.color() == enemy
+                        {
+                            let tv = get_piece_value(target.piece_type());
+                            if tv >= 600 {
+                                if color == PlayerColor::White {
+                                    w_pawn_threats += PAWN_THREATENS_QUEEN;
+                                } else {
+                                    b_pawn_threats += PAWN_THREATENS_QUEEN;
+                                }
+                            } else if tv >= 400 {
+                                if color == PlayerColor::White {
+                                    w_pawn_threats += PAWN_THREATENS_ROOK;
+                                } else {
+                                    b_pawn_threats += PAWN_THREATENS_ROOK;
+                                }
+                            } else if tv >= 200 {
+                                if color == PlayerColor::White {
+                                    w_pawn_threats += PAWN_THREATENS_MINOR;
+                                } else {
+                                    b_pawn_threats += PAWN_THREATENS_MINOR;
                                 }
                             }
+                        }
                     }
                 }
                 PieceType::Knight | PieceType::Centaur | PieceType::RoyalCentaur => {
                     for &(dx, dy) in &KNIGHT_OFFSETS {
                         if let Some(target) = game.board.get_piece(x + dx, y + dy)
-                            && target.color() == enemy {
-                                let tv = get_piece_value(target.piece_type());
-                                let mv = get_piece_value(pt);
-                                if tv >= 600 && mv < 600 {
-                                    if color == PlayerColor::White {
-                                        w_minor_threats += MINOR_THREATENS_QUEEN;
-                                    } else {
-                                        b_minor_threats += MINOR_THREATENS_QUEEN;
-                                    }
-                                } else if tv >= 400 && mv < 400 {
-                                    if color == PlayerColor::White {
-                                        w_minor_threats += MINOR_THREATENS_ROOK;
-                                    } else {
-                                        b_minor_threats += MINOR_THREATENS_ROOK;
-                                    }
+                            && target.color() == enemy
+                        {
+                            let tv = get_piece_value(target.piece_type());
+                            let mv = get_piece_value(pt);
+                            if tv >= 600 && mv < 600 {
+                                if color == PlayerColor::White {
+                                    w_minor_threats += MINOR_THREATENS_QUEEN;
+                                } else {
+                                    b_minor_threats += MINOR_THREATENS_QUEEN;
+                                }
+                            } else if tv >= 400 && mv < 400 {
+                                if color == PlayerColor::White {
+                                    w_minor_threats += MINOR_THREATENS_ROOK;
+                                } else {
+                                    b_minor_threats += MINOR_THREATENS_ROOK;
                                 }
                             }
+                        }
                     }
                 }
                 _ => {}
