@@ -1971,6 +1971,81 @@ fn compute_attack_bonus(
     diag_bonus + ortho_bonus
 }
 
+/// Calculate defense urgency as a percentage (0-100) based on WHAT pieces the enemy has.
+/// More dangerous pieces (queens, rooks) increase urgency more than minor pieces.
+fn calculate_defense_urgency(game: &GameState, defender: PlayerColor) -> i32 {
+    let is_white_attacker = defender == PlayerColor::Black;
+
+    // Threat weights - queens/amazons are dangerous even alone
+    const QUEEN_THREAT: i32 = 40;
+    const ROOK_THREAT: i32 = 15;
+    const BISHOP_THREAT: i32 = 10;
+    const KNIGHTRIDER_THREAT: i32 = 8; // Can create mating patterns
+    const MINOR_THREAT: i32 = 3; // Knights, guards, other leapers
+
+    let mut threat_points: i32 = 0;
+    let mut has_queen = false;
+
+    for (_, _, tile) in game.board.tiles.iter() {
+        let attacker_occ = if is_white_attacker {
+            tile.occ_white
+        } else {
+            tile.occ_black
+        };
+        if attacker_occ == 0 {
+            continue;
+        }
+
+        // Count queens/amazons (both have occ_diag_sliders AND occ_ortho_sliders)
+        let queens = attacker_occ & tile.occ_diag_sliders & tile.occ_ortho_sliders;
+        let queen_count = queens.count_ones() as i32;
+        if queen_count > 0 {
+            has_queen = true;
+            threat_points += queen_count * QUEEN_THREAT;
+        }
+
+        // Count rooks (ortho sliders that are NOT queens)
+        let rooks = (attacker_occ & tile.occ_ortho_sliders) & !queens;
+        threat_points += rooks.count_ones() as i32 * ROOK_THREAT;
+
+        // Count bishops (diag sliders that are NOT queens)
+        let bishops = (attacker_occ & tile.occ_bishops) & !queens;
+        threat_points += bishops.count_ones() as i32 * BISHOP_THREAT;
+
+        // Count minor pieces (knights, centaurs, knightriders, etc.)
+        // Scan bits that aren't accounted for by slider bitboards
+        let mut minor_bits = attacker_occ
+            & !(tile.occ_diag_sliders | tile.occ_ortho_sliders | tile.occ_pawns | tile.occ_kings);
+        while minor_bits != 0 {
+            let idx = minor_bits.trailing_zeros() as usize;
+            minor_bits &= minor_bits - 1;
+            let pt = crate::board::Piece::from_packed(tile.piece[idx]).piece_type();
+            if pt == PieceType::Knightrider {
+                threat_points += KNIGHTRIDER_THREAT;
+            } else {
+                threat_points += MINOR_THREAT;
+            }
+        }
+    }
+
+    // Queen alone is still dangerous - minimum 60% urgency if they have a queen
+    if threat_points >= 80 {
+        100 // Heavy attack potential - full defense needed
+    } else if threat_points >= 55 {
+        85 // Multiple attackers or queen + support
+    } else if threat_points >= 40 {
+        70 // Queen with minimal support
+    } else if has_queen {
+        60 // Queen alone - still dangerous
+    } else if threat_points >= 25 {
+        50 // Multiple minor attackers
+    } else if threat_points >= 10 {
+        30 // Light threat
+    } else {
+        10 // Minimal threat - defense barely needed
+    }
+}
+
 fn evaluate_king_shelter(
     game: &GameState,
     king: &Coordinate,
@@ -2065,7 +2140,6 @@ fn evaluate_king_shelter(
     let mut enemy_ortho_threat: i32 = 0;
     let mut enemy_diag_count: i32 = 0;
     let mut enemy_ortho_count: i32 = 0;
-    let mut enemy_non_pawn_pieces: i32 = 0;
     let mut has_enemy_queen = false;
     let mut ring_pressure = 0; // Danger from proximal enemy pieces
 
@@ -2078,9 +2152,6 @@ fn evaluate_king_shelter(
         if enemy_occ == 0 {
             continue;
         }
-
-        let enemy_non_pawns = enemy_occ & !tile.occ_pawns & !tile.occ_void;
-        enemy_non_pawn_pieces += enemy_non_pawns.count_ones() as i32;
 
         let mut bits = enemy_occ;
         while bits != 0 {
@@ -2117,21 +2188,10 @@ fn evaluate_king_shelter(
         return safety;
     }
 
-    // Endgame scaling: fewer non-pawn enemy pieces = less danger from open rays
-    // At 4+ pieces: full penalty (100%). At 2 pieces: 50%. At 1: 25%. At 0: none.
-    // This is gentler than before - rays matter even with few pieces
-    let endgame_scale = if enemy_non_pawn_pieces >= 4 {
-        100
-    } else if enemy_non_pawn_pieces == 3 {
-        85
-    } else if enemy_non_pawn_pieces == 2 {
-        60
-    } else if enemy_non_pawn_pieces == 1 {
-        30
-    } else {
-        0
-    };
-    if endgame_scale == 0 {
+    // Defense urgency: based on WHAT pieces enemy has
+    // Returns percentage (10-100) representing how urgently defense is needed
+    let defense_urgency = calculate_defense_urgency(game, color);
+    if defense_urgency <= 10 {
         return safety;
     }
 
@@ -2355,7 +2415,8 @@ fn evaluate_king_shelter(
 
     // Final grounded scaling: Linear base + Quadratic coordination bonus
     // Punishes high coordinated danger while remaining conservative at low danger.
-    let final_penalty = (total_danger + (total_danger * total_danger / 800)) * endgame_scale / 100;
+    let final_penalty =
+        (total_danger + (total_danger * total_danger / 800)) * defense_urgency / 100;
     safety -= final_penalty.min(400); // Grounded Cap
 
     safety
